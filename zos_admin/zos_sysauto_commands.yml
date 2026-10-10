@@ -3,12 +3,17 @@
 # Playbook : zos_sysauto_commands.yml
 # Purpose  : Issue IBM System Automation for z/OS (SA z/OS) console commands
 #            via z/OS operator MODIFY (F) to demonstrate key SA capabilities:
-#              1. DISPSTAT  - display all subsystem resource statuses
-#              2. INGVOTE   - cast a DOWN vote against a target resource
-#              3. INGVOTE CANCEL - cancel an existing vote to allow the
-#                                  resource to return to UP
+#              1. DISPSTAT  - display and parse ALL subsystem resource statuses
+#              2. INGLIST   - display and parse ALL resources (compound/desired/
+#                             observed states) then single-resource for checks
+#              3. INGREQ REQ=STOP   - create an operator STOP request
+#              4. INGVOTE           - view the current vote table for a resource
+#              5. INGSET CANCEL     - cancel the STOP request to allow recovery
+#              6. INGLIST (single)  - confirm final resource state
 # Usage    : ansible-playbook zos_admin/zos_sysauto_commands.yml \
-#               -e "target_resource=FTPSERVE"
+#               -e "target_resource=FTPSERVE" \
+#               -e "target_type=APL" \
+#               -e "target_system=LTE1"
 # =============================================================================
 - name: IBM System Automation for z/OS - Console Commands Demo
   hosts: zos_host
@@ -17,16 +22,18 @@
 
   vars:
     # ------------------------------------------------------------------
-    # SA z/OS started-task / PROC name.  Change this if your automation
-    # anchor runs under a different name.
+    # SA z/OS started-task / PROC name.
     # ------------------------------------------------------------------
     sa_proc: "AUTOPROC"
 
     # ------------------------------------------------------------------
-    # Resource to act on with INGVOTE (override on the command line with
-    # -e "target_resource=<NAME>").
+    # Resource to act on with INGVOTE / INGLIST.
+    # Override all three on the command line with -e as needed.
+    # The fully-qualified SA name is: <resource>/<type>/<system>
     # ------------------------------------------------------------------
     target_resource: "FTPSERVE"
+    target_type:     "APL"
+    target_system:   "LTE1"
 
   tasks:
 
@@ -44,18 +51,10 @@
         msg: "{{ dispstat_output.stdout_lines }}"
 
     # -------------------------------------------------------------------------
-    # Parse the DISPSTAT response into a structured list of dicts so that
-    # downstream tasks can query resource states easily.
-    #
-    # NOTE: zos_operator returns output in 'stdout_lines' (a list of strings).
-    #       Each data line is heavily left-padded with spaces, so we strip()
-    #       before splitting to get clean tokens.
-    #
-    # A valid resource line (after strip) looks like:
+    # Parse DISPSTAT into sa_resources: [{resource, status, system}, ...]
+    # Valid data line (after strip):
     #   "FTPSERVE    UP       LTE1     FTPSERVE - - - - - -  MVS      --none--"
-    # We skip: blank lines, separator lines (start with '-' or '*'),
-    #          the column header line (starts with 'Resource'),
-    #          the console echo lines (contain 'ISF031I' or '-F ').
+    # Skip: blank, separator (---), footer (***), column header, console noise.
     # -------------------------------------------------------------------------
     - name: "SA | DISPSTAT - Parse response into resource list"
       ansible.builtin.set_fact:
@@ -83,126 +82,203 @@
         msg: "{{ sa_resources }}"
 
     # =========================================================================
-    # 2. INGVOTE ACTION=DOWN  -  Cast a vote to bring a resource DOWN
-    #
-    #    Syntax:  F <sa_proc>,INGVOTE ACTION=DOWN,RESOURCE=<resource>
-    #             [,COMMENT='<text>']
-    #
-    #    SA z/OS will evaluate all outstanding votes. If the DOWN vote wins
-    #    the voting process the resource will be stopped via the automation
-    #    policy.  Other operators / automation may hold UP votes that keep
-    #    the resource running.
+    # 2. INGLIST - Display compound/desired/observed state of ALL resources
     # =========================================================================
-    - name: "SA | INGVOTE - Cast DOWN vote for resource {{ target_resource }}"
+    - name: "SA | INGLIST - Display all resource states"
       ibm.ibm_zos_core.zos_operator:
-        cmd: "F {{ sa_proc }},INGVOTE ACTION=DOWN,RESOURCE={{ target_resource }},COMMENT='Ansible maintenance vote'"
+        cmd: "F {{ sa_proc }},INGLIST"
         verbose: false
-      register: ingvote_down_output
+      register: inglist_output
 
-    - name: "SA | INGVOTE DOWN - Show operator response"
+    - name: "SA | INGLIST - Show raw operator response"
       ansible.builtin.debug:
-        msg: "{{ ingvote_down_output.stdout_lines }}"
+        msg: "{{ inglist_output.stdout_lines }}"
 
     # -------------------------------------------------------------------------
-    # Wait 30 seconds to allow SA z/OS to process the DOWN vote before
-    # checking the resource status and subsequently cancelling the vote.
+    # Parse INGLIST into sa_inglist: [{name, type, system, compound, desired,
+    #                                   observed}, ...]
+    # Valid data line (after strip):
+    #   "FTPSERVE    APL  LTE1         SATISFACTORY AVAILABLE    AVAILABLE"
+    # Columns: Name(0) Type(1) System(2) Sus(3-optional) Compound Desired
+    #          Observed
+    # Skip: blank, separator, header (Name), console noise, Sysplex line.
     # -------------------------------------------------------------------------
-    - name: "SA | Wait 30 seconds for SA z/OS to process the DOWN vote"
+    - name: "SA | INGLIST - Parse response into resource state list"
+      ansible.builtin.set_fact:
+        sa_inglist: >-
+          {{
+            sa_inglist | default([]) + [{
+              'name':     (item | trim).split()[0],
+              'type':     (item | trim).split()[1],
+              'system':   (item | trim).split()[2],
+              'compound': (item | trim).split()[3],
+              'desired':  (item | trim).split()[4],
+              'observed': (item | trim).split()[5]
+            }]
+          }}
+      loop: "{{ inglist_output.stdout_lines }}"
+      when:
+        - item | trim | length > 0
+        - not (item | trim).startswith('-')
+        - not (item | trim).startswith('*')
+        - not (item | trim).startswith('Name')
+        - not (item | trim).startswith('ISF')
+        - not (item | trim).startswith('LTE')
+        - not (item | trim).startswith('Sysplex')
+        - not (item | trim).startswith('RESPONSE=')
+        - not (item | trim is search('-F '))
+        - ((item | trim).split() | length) >= 6
+
+    - name: "SA | INGLIST - Show parsed resource state list"
+      ansible.builtin.debug:
+        msg: "{{ sa_inglist }}"
+
+    # =========================================================================
+    # 3. INGREQ REQ=STOP  -  Create a STOP request (operator vote) for resource
+    #
+    #    Syntax:
+    #      F <proc>,INGREQ <resource>/<type>/<system> REQ=STOP OUTMODE=LINE VERIFY=NO
+    #
+    #    INGREQ is the correct SA z/OS command to submit an operator request
+    #    against a resource.  REQ=STOP asks SA to stop the resource according
+    #    to its automation policy.  OUTMODE=LINE produces line-mode (non-full-
+    #    screen) output suitable for operator console capture.  VERIFY=NO
+    #    suppresses the interactive confirmation panel.
+    # =========================================================================
+    - name: "SA | INGREQ - Create STOP request for {{ target_resource }}/{{ target_type }}/{{ target_system }}"
+      ibm.ibm_zos_core.zos_operator:
+        cmd: "F {{ sa_proc }},INGREQ {{ target_resource }}/{{ target_type }}/{{ target_system }} REQ=STOP OUTMODE=LINE VERIFY=NO"
+        verbose: false
+      register: ingreq_stop_output
+
+    - name: "SA | INGREQ STOP - Show operator response"
+      ansible.builtin.debug:
+        msg: "{{ ingreq_stop_output.stdout_lines }}"
+
+    # =========================================================================
+    # 4. INGVOTE  -  View all outstanding votes for the resource
+    #
+    #    Syntax:
+    #      F <proc>,INGVOTE <resource>/<type>/<system> OUTMODE=LINE
+    #
+    #    INGVOTE with no REQUEST= keyword displays the current vote table
+    #    for the specified resource, showing who submitted each vote and
+    #    what the resulting desired state is.
+    # =========================================================================
+    - name: "SA | INGVOTE - View votes for {{ target_resource }}/{{ target_type }}/{{ target_system }}"
+      ibm.ibm_zos_core.zos_operator:
+        cmd: "F {{ sa_proc }},INGVOTE {{ target_resource }}/{{ target_type }}/{{ target_system }} OUTMODE=LINE"
+        verbose: false
+      register: ingvote_view_output
+
+    - name: "SA | INGVOTE - Show current vote table for {{ target_resource }}"
+      ansible.builtin.debug:
+        msg: "{{ ingvote_view_output.stdout_lines }}"
+
+    # -------------------------------------------------------------------------
+    # Wait 30 seconds to allow SA z/OS to action the STOP request, then check
+    # the single-resource state with INGLIST before cancelling.
+    # -------------------------------------------------------------------------
+    - name: "SA | Wait 30 seconds for SA z/OS to action the STOP request"
       ansible.builtin.wait_for:
         timeout: 30
 
-    - name: "SA | DISPSTAT - Check status of {{ target_resource }} after DOWN vote"
+    - name: "SA | INGLIST - Check {{ target_resource }} state after STOP request"
       ibm.ibm_zos_core.zos_operator:
-        cmd: "F {{ sa_proc }},DISPSTAT"
+        cmd: "F {{ sa_proc }},INGLIST {{ target_resource }}/{{ target_type }}/{{ target_system }}"
         verbose: false
-      register: dispstat_mid_output
+      register: inglist_mid_output
 
-    - name: "SA | DISPSTAT - Parse mid-vote status for {{ target_resource }}"
+    - name: "SA | INGLIST - Parse mid-request state for {{ target_resource }}"
       ansible.builtin.set_fact:
-        sa_resources_mid: >-
+        sa_inglist_mid: >-
           {{
-            sa_resources_mid | default([]) + [{
-              'resource': (item | trim).split()[0],
-              'status':   (item | trim).split()[1],
-              'system':   (item | trim).split()[2]
+            sa_inglist_mid | default([]) + [{
+              'name':     (item | trim).split()[0],
+              'type':     (item | trim).split()[1],
+              'system':   (item | trim).split()[2],
+              'compound': (item | trim).split()[3],
+              'desired':  (item | trim).split()[4],
+              'observed': (item | trim).split()[5]
             }]
           }}
-      loop: "{{ dispstat_mid_output.stdout_lines }}"
+      loop: "{{ inglist_mid_output.stdout_lines }}"
       when:
         - item | trim | length > 0
         - not (item | trim).startswith('-')
         - not (item | trim).startswith('*')
-        - not (item | trim).startswith('Resource')
+        - not (item | trim).startswith('Name')
         - not (item | trim).startswith('ISF')
         - not (item | trim).startswith('LTE')
+        - not (item | trim).startswith('Sysplex')
+        - not (item | trim).startswith('RESPONSE=')
         - not (item | trim is search('-F '))
-        - ((item | trim).split() | length) >= 3
+        - ((item | trim).split() | length) >= 6
         - (item | trim).split()[0] == target_resource
 
-    - name: "SA | DISPSTAT - Show mid-vote status of {{ target_resource }}"
+    - name: "SA | INGLIST - Show mid-request state of {{ target_resource }}"
       ansible.builtin.debug:
-        msg: >-
-          {{
-            sa_resources_mid
-            | selectattr('resource', 'equalto', target_resource)
-            | list
-          }}
+        msg: "{{ sa_inglist_mid | default([]) }}"
 
     # =========================================================================
-    # 3. INGVOTE ACTION=CANCEL  -  Cancel the DOWN vote to allow recovery
+    # 5. INGSET CANCEL  -  Cancel the STOP request to allow recovery
     #
-    #    Syntax:  F <sa_proc>,INGVOTE ACTION=CANCEL,RESOURCE=<resource>
+    #    Syntax:
+    #      F <proc>,INGSET CANCEL <resource>/<type>/<system>
+    #        REQUEST=MAKEUNAVAILABLE SOURCE=OPERATOR OUTMODE=LINE VERIFY=NO
     #
-    #    Cancelling all DOWN votes (or ensuring no DOWN votes remain) lets
-    #    SA z/OS bring the resource back UP according to its automation
-    #    policy.  Issue ACTION=UP explicitly if you want to force a restart.
+    #    INGSET CANCEL removes the operator-submitted MAKEUNAVAILABLE (STOP)
+    #    request from the vote table.  Once all STOP/MAKEUNAVAILABLE votes are
+    #    cleared SA z/OS can bring the resource back to its desired AVAILABLE
+    #    state per the automation policy.  SOURCE=OPERATOR targets only votes
+    #    cast by operators (not by automation policies).
     # =========================================================================
-    - name: "SA | INGVOTE - Cancel DOWN vote for resource {{ target_resource }}"
+    - name: "SA | INGSET - Cancel STOP request for {{ target_resource }}/{{ target_type }}/{{ target_system }}"
       ibm.ibm_zos_core.zos_operator:
-        cmd: "F {{ sa_proc }},INGVOTE ACTION=CANCEL,RESOURCE={{ target_resource }}"
+        cmd: "F {{ sa_proc }},INGSET CANCEL {{ target_resource }}/{{ target_type }}/{{ target_system }} REQUEST=MAKEUNAVAILABLE SOURCE=OPERATOR OUTMODE=LINE VERIFY=NO"
         verbose: false
-      register: ingvote_cancel_output
+      register: ingset_cancel_output
 
-    - name: "SA | INGVOTE CANCEL - Show operator response"
+    - name: "SA | INGSET CANCEL - Show operator response"
       ansible.builtin.debug:
-        msg: "{{ ingvote_cancel_output.stdout_lines }}"
+        msg: "{{ ingset_cancel_output.stdout_lines }}"
 
     # =========================================================================
-    # 4. Post-vote DISPSTAT  -  Confirm final state of the target resource
+    # 6. Post-cancel INGLIST - Confirm final state of the target resource
     # =========================================================================
-    - name: "SA | DISPSTAT - Refresh status after INGVOTE operations"
+    - name: "SA | INGLIST - Check {{ target_resource }} final state after CANCEL"
       ibm.ibm_zos_core.zos_operator:
-        cmd: "F {{ sa_proc }},DISPSTAT"
+        cmd: "F {{ sa_proc }},INGLIST {{ target_resource }}/{{ target_type }}/{{ target_system }}"
         verbose: false
-      register: dispstat_post_output
+      register: inglist_post_output
 
-    - name: "SA | DISPSTAT - Re-parse status for {{ target_resource }}"
+    - name: "SA | INGLIST - Parse final state for {{ target_resource }}"
       ansible.builtin.set_fact:
-        sa_resources_post: >-
+        sa_inglist_post: >-
           {{
-            sa_resources_post | default([]) + [{
-              'resource': (item | trim).split()[0],
-              'status':   (item | trim).split()[1],
-              'system':   (item | trim).split()[2]
+            sa_inglist_post | default([]) + [{
+              'name':     (item | trim).split()[0],
+              'type':     (item | trim).split()[1],
+              'system':   (item | trim).split()[2],
+              'compound': (item | trim).split()[3],
+              'desired':  (item | trim).split()[4],
+              'observed': (item | trim).split()[5]
             }]
           }}
-      loop: "{{ dispstat_post_output.stdout_lines }}"
+      loop: "{{ inglist_post_output.stdout_lines }}"
       when:
         - item | trim | length > 0
         - not (item | trim).startswith('-')
         - not (item | trim).startswith('*')
-        - not (item | trim).startswith('Resource')
+        - not (item | trim).startswith('Name')
         - not (item | trim).startswith('ISF')
         - not (item | trim).startswith('LTE')
+        - not (item | trim).startswith('Sysplex')
+        - not (item | trim).startswith('RESPONSE=')
         - not (item | trim is search('-F '))
-        - ((item | trim).split() | length) >= 3
+        - ((item | trim).split() | length) >= 6
         - (item | trim).split()[0] == target_resource
 
-    - name: "SA | DISPSTAT - Show current status of {{ target_resource }}"
+    - name: "SA | INGLIST - Show final state of {{ target_resource }}"
       ansible.builtin.debug:
-        msg: >-
-          {{
-            sa_resources_post
-            | selectattr('resource', 'equalto', target_resource)
-            | list
-          }}
+        msg: "{{ sa_inglist_post | default([]) }}"
