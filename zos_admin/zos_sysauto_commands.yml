@@ -12,6 +12,7 @@
 # =============================================================================
 - name: IBM System Automation for z/OS - Console Commands Demo
   hosts: zos_host
+  environment: "{{ environment_vars }}"
   gather_facts: false
 
   vars:
