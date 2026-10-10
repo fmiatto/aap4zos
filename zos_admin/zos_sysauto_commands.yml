@@ -95,10 +95,7 @@
     # =========================================================================
     - name: "SA | INGVOTE - Cast DOWN vote for resource {{ target_resource }}"
       ibm.ibm_zos_core.zos_operator:
-        cmd: >-
-          F {{ sa_proc }},INGVOTE
-          ACTION=DOWN,RESOURCE={{ target_resource }},
-          COMMENT='Ansible playbook - scheduled maintenance vote'
+        cmd: "F {{ sa_proc }},INGVOTE ACTION=DOWN,RESOURCE={{ target_resource }},COMMENT='Ansible maintenance vote'"
         verbose: false
       register: ingvote_down_output
 
@@ -140,6 +137,7 @@
         - not (item | trim).startswith('LTE')
         - not (item | trim is search('-F '))
         - ((item | trim).split() | length) >= 3
+        - (item | trim).split()[0] == target_resource
 
     - name: "SA | DISPSTAT - Show mid-vote status of {{ target_resource }}"
       ansible.builtin.debug:
@@ -178,7 +176,7 @@
         verbose: false
       register: dispstat_post_output
 
-    - name: "SA | DISPSTAT - Re-parse updated resource list"
+    - name: "SA | DISPSTAT - Re-parse status for {{ target_resource }}"
       ansible.builtin.set_fact:
         sa_resources_post: >-
           {{
@@ -198,6 +196,7 @@
         - not (item | trim).startswith('LTE')
         - not (item | trim is search('-F '))
         - ((item | trim).split() | length) >= 3
+        - (item | trim).split()[0] == target_resource
 
     - name: "SA | DISPSTAT - Show current status of {{ target_resource }}"
       ansible.builtin.debug:
