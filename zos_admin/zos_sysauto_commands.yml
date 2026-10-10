@@ -41,37 +41,42 @@
 
     - name: "SA | DISPSTAT - Show raw operator response"
       ansible.builtin.debug:
-        msg: "{{ dispstat_output.msg }}"
+        msg: "{{ dispstat_output.stdout_lines }}"
 
     # -------------------------------------------------------------------------
     # Parse the DISPSTAT response into a structured list of dicts so that
     # downstream tasks can query resource states easily.
     #
-    # DISPSTAT output lines look like (after the two header rows):
-    #   " FTPSERVE    UP       LTE1     FTPSERVE - - - - - -  MVS      --none--"
-    # We skip blank lines and lines that start with a space followed by a
-    # dash (separator rows) or the word "Resource" (column header).
+    # NOTE: zos_operator returns output in 'stdout_lines' (a list of strings).
+    #       Each data line is heavily left-padded with spaces, so we strip()
+    #       before splitting to get clean tokens.
     #
-    # NOTE: zos_operator returns the console response in the 'msg' list
-    #       (a list of strings) when verbose: false.
+    # A valid resource line (after strip) looks like:
+    #   "FTPSERVE    UP       LTE1     FTPSERVE - - - - - -  MVS      --none--"
+    # We skip: blank lines, separator lines (start with '-' or '*'),
+    #          the column header line (starts with 'Resource'),
+    #          the console echo lines (contain 'ISF031I' or '-F ').
     # -------------------------------------------------------------------------
     - name: "SA | DISPSTAT - Parse response into resource list"
       ansible.builtin.set_fact:
         sa_resources: >-
           {{
             sa_resources | default([]) + [{
-              'resource': item.split()[0],
-              'status':   item.split()[1],
-              'system':   item.split()[2]
+              'resource': (item | trim).split()[0],
+              'status':   (item | trim).split()[1],
+              'system':   (item | trim).split()[2]
             }]
           }}
-      loop: "{{ dispstat_output.msg }}"
+      loop: "{{ dispstat_output.stdout_lines }}"
       when:
         - item | trim | length > 0
         - not (item | trim).startswith('-')
+        - not (item | trim).startswith('*')
         - not (item | trim).startswith('Resource')
-        - not (item | trim).startswith('RESPONSE=')
-        - (item.split() | length) >= 3
+        - not (item | trim).startswith('ISF')
+        - not (item | trim).startswith('LTE')
+        - not (item | trim is search('-F '))
+        - ((item | trim).split() | length) >= 3
 
     - name: "SA | DISPSTAT - Show parsed resource list"
       ansible.builtin.debug:
@@ -99,7 +104,7 @@
 
     - name: "SA | INGVOTE DOWN - Show operator response"
       ansible.builtin.debug:
-        msg: "{{ ingvote_down_output.msg }}"
+        msg: "{{ ingvote_down_output.stdout_lines }}"
 
     # -------------------------------------------------------------------------
     # Wait 30 seconds to allow SA z/OS to process the DOWN vote before
@@ -120,18 +125,21 @@
         sa_resources_mid: >-
           {{
             sa_resources_mid | default([]) + [{
-              'resource': item.split()[0],
-              'status':   item.split()[1],
-              'system':   item.split()[2]
+              'resource': (item | trim).split()[0],
+              'status':   (item | trim).split()[1],
+              'system':   (item | trim).split()[2]
             }]
           }}
-      loop: "{{ dispstat_mid_output.msg }}"
+      loop: "{{ dispstat_mid_output.stdout_lines }}"
       when:
         - item | trim | length > 0
         - not (item | trim).startswith('-')
+        - not (item | trim).startswith('*')
         - not (item | trim).startswith('Resource')
-        - not (item | trim).startswith('RESPONSE=')
-        - (item.split() | length) >= 3
+        - not (item | trim).startswith('ISF')
+        - not (item | trim).startswith('LTE')
+        - not (item | trim is search('-F '))
+        - ((item | trim).split() | length) >= 3
 
     - name: "SA | DISPSTAT - Show mid-vote status of {{ target_resource }}"
       ansible.builtin.debug:
@@ -159,7 +167,7 @@
 
     - name: "SA | INGVOTE CANCEL - Show operator response"
       ansible.builtin.debug:
-        msg: "{{ ingvote_cancel_output.msg }}"
+        msg: "{{ ingvote_cancel_output.stdout_lines }}"
 
     # =========================================================================
     # 4. Post-vote DISPSTAT  -  Confirm final state of the target resource
@@ -175,18 +183,21 @@
         sa_resources_post: >-
           {{
             sa_resources_post | default([]) + [{
-              'resource': item.split()[0],
-              'status':   item.split()[1],
-              'system':   item.split()[2]
+              'resource': (item | trim).split()[0],
+              'status':   (item | trim).split()[1],
+              'system':   (item | trim).split()[2]
             }]
           }}
-      loop: "{{ dispstat_post_output.msg }}"
+      loop: "{{ dispstat_post_output.stdout_lines }}"
       when:
         - item | trim | length > 0
         - not (item | trim).startswith('-')
+        - not (item | trim).startswith('*')
         - not (item | trim).startswith('Resource')
-        - not (item | trim).startswith('RESPONSE=')
-        - (item.split() | length) >= 3
+        - not (item | trim).startswith('ISF')
+        - not (item | trim).startswith('LTE')
+        - not (item | trim is search('-F '))
+        - ((item | trim).split() | length) >= 3
 
     - name: "SA | DISPSTAT - Show current status of {{ target_resource }}"
       ansible.builtin.debug:
