@@ -41,7 +41,7 @@
 
     - name: "SA | DISPSTAT - Show raw operator response"
       ansible.builtin.debug:
-        msg: "{{ dispstat_output.content }}"
+        msg: "{{ dispstat_output.msg }}"
 
     # -------------------------------------------------------------------------
     # Parse the DISPSTAT response into a structured list of dicts so that
@@ -51,6 +51,9 @@
     #   " FTPSERVE    UP       LTE1     FTPSERVE - - - - - -  MVS      --none--"
     # We skip blank lines and lines that start with a space followed by a
     # dash (separator rows) or the word "Resource" (column header).
+    #
+    # NOTE: zos_operator returns the console response in the 'msg' list
+    #       (a list of strings) when verbose: false.
     # -------------------------------------------------------------------------
     - name: "SA | DISPSTAT - Parse response into resource list"
       ansible.builtin.set_fact:
@@ -62,7 +65,7 @@
               'system':   item.split()[2]
             }]
           }}
-      loop: "{{ dispstat_output.content }}"
+      loop: "{{ dispstat_output.msg }}"
       when:
         - item | trim | length > 0
         - not (item | trim).startswith('-')
@@ -96,7 +99,7 @@
 
     - name: "SA | INGVOTE DOWN - Show operator response"
       ansible.builtin.debug:
-        msg: "{{ ingvote_down_output.content }}"
+        msg: "{{ ingvote_down_output.msg }}"
 
     # -------------------------------------------------------------------------
     # Wait 30 seconds to allow SA z/OS to process the DOWN vote before
@@ -122,7 +125,7 @@
               'system':   item.split()[2]
             }]
           }}
-      loop: "{{ dispstat_mid_output.content }}"
+      loop: "{{ dispstat_mid_output.msg }}"
       when:
         - item | trim | length > 0
         - not (item | trim).startswith('-')
@@ -156,7 +159,7 @@
 
     - name: "SA | INGVOTE CANCEL - Show operator response"
       ansible.builtin.debug:
-        msg: "{{ ingvote_cancel_output.content }}"
+        msg: "{{ ingvote_cancel_output.msg }}"
 
     # =========================================================================
     # 4. Post-vote DISPSTAT  -  Confirm final state of the target resource
@@ -177,7 +180,7 @@
               'system':   item.split()[2]
             }]
           }}
-      loop: "{{ dispstat_post_output.content }}"
+      loop: "{{ dispstat_post_output.msg }}"
       when:
         - item | trim | length > 0
         - not (item | trim).startswith('-')
