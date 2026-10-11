@@ -18,13 +18,6 @@
   environment: "{{ environment_vars }}"
   gather_facts: false
 
-  vars:
-    # SA z/OS PROC name — survey may override.
-    sa_proc: "{{ sa_proc | default('AUTOPROC') }}"
-
-    # Optional filter: blank = show all; set to a name or mask to narrow scope.
-    dispstat_filter: "{{ dispstat_filter | default('') }}"
-
   tasks:
 
     # =========================================================================
@@ -35,8 +28,8 @@
       ansible.builtin.set_fact:
         dispstat_cmd: >-
           {{
-            'F ' + sa_proc + ',DISPSTAT'
-            + ((' ' + dispstat_filter) if dispstat_filter | trim | length > 0 else '')
+            'F ' + (sa_proc | default('AUTOPROC')) + ',DISPSTAT'
+            + ((' ' + dispstat_filter) if (dispstat_filter | default('')) | trim | length > 0 else '')
           }}
 
     - name: "SA | DISPSTAT - Issue command: {{ dispstat_cmd }}"

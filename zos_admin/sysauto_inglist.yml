@@ -19,13 +19,6 @@
   environment: "{{ environment_vars }}"
   gather_facts: false
 
-  vars:
-    # SA z/OS PROC name — survey may override.
-    sa_proc: "{{ sa_proc | default('AUTOPROC') }}"
-
-    # Optional filter: blank = show all.
-    inglist_filter: "{{ inglist_filter | default('') }}"
-
   tasks:
 
     # =========================================================================
@@ -36,8 +29,8 @@
       ansible.builtin.set_fact:
         inglist_cmd: >-
           {{
-            'F ' + sa_proc + ',INGLIST'
-            + ((' ' + inglist_filter) if inglist_filter | trim | length > 0 else '')
+            'F ' + (sa_proc | default('AUTOPROC')) + ',INGLIST'
+            + ((' ' + inglist_filter) if (inglist_filter | default('')) | trim | length > 0 else '')
           }}
 
     - name: "SA | INGLIST - Issue command: {{ inglist_cmd }}"

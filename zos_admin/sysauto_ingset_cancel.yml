@@ -28,15 +28,6 @@
   environment: "{{ environment_vars }}"
   gather_facts: false
 
-  vars:
-    # SA z/OS PROC name — survey may override.
-    sa_proc: "{{ sa_proc | default('AUTOPROC') }}"
-
-    # All three resource qualifier fields are required for INGSET CANCEL.
-    target_resource: "{{ target_resource | default('') }}"
-    target_type:     "{{ target_type     | default('') }}"
-    target_system:   "{{ target_system   | default('') }}"
-
   tasks:
 
     - name: "SA | Validate that all resource qualifier fields are provided"
@@ -46,9 +37,9 @@
           are all required for INGSET CANCEL.
           Please re-run the job template and supply all three values.
       when: >-
-        target_resource | trim | length == 0 or
-        target_type     | trim | length == 0 or
-        target_system   | trim | length == 0
+        (target_resource | default('')) | trim | length == 0 or
+        (target_type     | default('')) | trim | length == 0 or
+        (target_system   | default('')) | trim | length == 0
 
     # =========================================================================
     # INGSET CANCEL - Remove the operator MAKEUNAVAILABLE (STOP) vote.
@@ -59,7 +50,7 @@
     - name: "SA | INGSET CANCEL - Cancel STOP vote for {{ target_resource }}/{{ target_type }}/{{ target_system }}"
       ibm.ibm_zos_core.zos_operator:
         cmd: >-
-          F {{ sa_proc }},INGSET CANCEL {{ target_resource }}/{{ target_type }}/{{ target_system }}
+          F {{ sa_proc | default('AUTOPROC') }},INGSET CANCEL {{ target_resource }}/{{ target_type }}/{{ target_system }}
           REQUEST=MAKEUNAVAILABLE SOURCE=OPERATOR OUTMODE=LINE VERIFY=NO
         verbose: false
       register: ingset_cancel_output
@@ -73,7 +64,7 @@
     # =========================================================================
     - name: "SA | INGLIST - Check {{ target_resource }} state after vote cancel"
       ibm.ibm_zos_core.zos_operator:
-        cmd: "F {{ sa_proc }},INGLIST {{ target_resource }}/{{ target_type }}/{{ target_system }}"
+        cmd: "F {{ sa_proc | default('AUTOPROC') }},INGLIST {{ target_resource }}/{{ target_type }}/{{ target_system }}"
         verbose: false
       register: inglist_post_output
 

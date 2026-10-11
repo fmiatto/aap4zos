@@ -26,15 +26,6 @@
   environment: "{{ environment_vars }}"
   gather_facts: false
 
-  vars:
-    # SA z/OS PROC name — survey may override.
-    sa_proc: "{{ sa_proc | default('AUTOPROC') }}"
-
-    # All three resource qualifier fields are required for INGREQ.
-    target_resource: "{{ target_resource | default('') }}"
-    target_type:     "{{ target_type     | default('') }}"
-    target_system:   "{{ target_system   | default('') }}"
-
   tasks:
 
     - name: "SA | Validate that all resource qualifier fields are provided"
@@ -44,9 +35,9 @@
           are all required for INGREQ REQ=STOP.
           Please re-run the job template and supply all three values.
       when: >-
-        target_resource | trim | length == 0 or
-        target_type     | trim | length == 0 or
-        target_system   | trim | length == 0
+        (target_resource | default('')) | trim | length == 0 or
+        (target_type     | default('')) | trim | length == 0 or
+        (target_system   | default('')) | trim | length == 0
 
     # =========================================================================
     # INGREQ REQ=STOP - Create an operator STOP request (vote) for the resource.
@@ -55,7 +46,7 @@
     # =========================================================================
     - name: "SA | INGREQ - Create STOP request for {{ target_resource }}/{{ target_type }}/{{ target_system }}"
       ibm.ibm_zos_core.zos_operator:
-        cmd: "F {{ sa_proc }},INGREQ {{ target_resource }}/{{ target_type }}/{{ target_system }} REQ=STOP OUTMODE=LINE VERIFY=NO"
+        cmd: "F {{ sa_proc | default('AUTOPROC') }},INGREQ {{ target_resource }}/{{ target_type }}/{{ target_system }} REQ=STOP OUTMODE=LINE VERIFY=NO"
         verbose: false
       register: ingreq_stop_output
 
@@ -69,7 +60,7 @@
     # =========================================================================
     - name: "SA | INGVOTE - Confirm vote was registered for {{ target_resource }}/{{ target_type }}/{{ target_system }}"
       ibm.ibm_zos_core.zos_operator:
-        cmd: "F {{ sa_proc }},INGVOTE {{ target_resource }}/{{ target_type }}/{{ target_system }} OUTMODE=LINE"
+        cmd: "F {{ sa_proc | default('AUTOPROC') }},INGVOTE {{ target_resource }}/{{ target_type }}/{{ target_system }} OUTMODE=LINE"
         verbose: false
       register: ingvote_output
 

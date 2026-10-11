@@ -16,10 +16,6 @@
   environment: "{{ environment_vars }}"
   gather_facts: false
 
-  vars:
-    # Populated by AAP survey; no meaningful default — command must be supplied.
-    zos_command: "{{ zos_command | default('') }}"
-
   tasks:
 
     - name: "SA | Validate that a command was provided"
@@ -27,7 +23,7 @@
         msg: >-
           Survey variable 'zos_command' is required but was not set.
           Please re-run the job template and provide the operator command.
-      when: zos_command | trim | length == 0
+      when: (zos_command | default('')) | trim | length == 0
 
     - name: "SA | Issue operator command: {{ zos_command }}"
       ibm.ibm_zos_core.zos_operator:
