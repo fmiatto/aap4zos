@@ -1,0 +1,92 @@
+---
+# =============================================================================
+# Playbook : sysauto_ingreq_stop.yml
+# Purpose  : Submit an operator STOP request (MAKEUNAVAILABLE vote) for a
+#            specific SA z/OS resource using INGREQ REQ=STOP.
+#
+#            INGREQ is the SA z/OS command to submit operator requests against
+#            a resource.  REQ=STOP asks SA to stop the resource according to
+#            its automation policy.  OUTMODE=LINE produces line-mode output
+#            suitable for operator console capture.  VERIFY=NO suppresses the
+#            interactive confirmation panel.
+#
+#            The INGREQ response and the follow-up vote table are published as
+#            AAP job artifacts accessible via the AAP API at:
+#              GET /api/v2/jobs/<id>/   →  .artifacts.ingreq_stop_output
+#              GET /api/v2/jobs/<id>/   →  .artifacts.ingvote_output
+#
+# Survey   :
+#   sa_proc         - SA z/OS started-task PROC name (default: AUTOPROC)
+#   target_resource - Resource name to stop (required)  e.g. FTPSERVE
+#   target_type     - SA z/OS resource type (required)  e.g. APL
+#   target_system   - System name the resource runs on (required) e.g. LTE1
+# =============================================================================
+- name: SA | INGREQ STOP - Submit operator STOP request for a resource
+  hosts: zos_host
+  environment: "{{ environment_vars }}"
+  gather_facts: false
+
+  vars:
+    # SA z/OS PROC name — survey may override.
+    sa_proc: "{{ sa_proc | default('AUTOPROC') }}"
+
+    # All three resource qualifier fields are required for INGREQ.
+    target_resource: "{{ target_resource | default('') }}"
+    target_type:     "{{ target_type     | default('') }}"
+    target_system:   "{{ target_system   | default('') }}"
+
+  tasks:
+
+    - name: "SA | Validate that all resource qualifier fields are provided"
+      ansible.builtin.fail:
+        msg: >-
+          Survey variables 'target_resource', 'target_type', and 'target_system'
+          are all required for INGREQ REQ=STOP.
+          Please re-run the job template and supply all three values.
+      when: >-
+        target_resource | trim | length == 0 or
+        target_type     | trim | length == 0 or
+        target_system   | trim | length == 0
+
+    # =========================================================================
+    # INGREQ REQ=STOP - Create an operator STOP request (vote) for the resource.
+    # Syntax:
+    #   F <proc>,INGREQ <resource>/<type>/<system> REQ=STOP OUTMODE=LINE VERIFY=NO
+    # =========================================================================
+    - name: "SA | INGREQ - Create STOP request for {{ target_resource }}/{{ target_type }}/{{ target_system }}"
+      ibm.ibm_zos_core.zos_operator:
+        cmd: "F {{ sa_proc }},INGREQ {{ target_resource }}/{{ target_type }}/{{ target_system }} REQ=STOP OUTMODE=LINE VERIFY=NO"
+        verbose: false
+      register: ingreq_stop_output
+
+    - name: "SA | INGREQ STOP - Show operator response"
+      ansible.builtin.debug:
+        msg: "{{ ingreq_stop_output.stdout_lines }}"
+
+    # =========================================================================
+    # Post-request INGVOTE - Show the current vote table to confirm the vote
+    # was registered.
+    # =========================================================================
+    - name: "SA | INGVOTE - Confirm vote was registered for {{ target_resource }}/{{ target_type }}/{{ target_system }}"
+      ibm.ibm_zos_core.zos_operator:
+        cmd: "F {{ sa_proc }},INGVOTE {{ target_resource }}/{{ target_type }}/{{ target_system }} OUTMODE=LINE"
+        verbose: false
+      register: ingvote_output
+
+    - name: "SA | INGVOTE - Show current vote table for {{ target_resource }}"
+      ansible.builtin.debug:
+        msg: "{{ ingvote_output.stdout_lines }}"
+
+    # =========================================================================
+    # Publish both the INGREQ response and the vote table confirmation as AAP
+    # artifacts visible in the job's API response:
+    #   GET /api/v2/jobs/<id>/  →  .artifacts.ingreq_stop_output
+    #   GET /api/v2/jobs/<id>/  →  .artifacts.ingvote_output
+    #   GET /api/v2/jobs/<id>/  →  .artifacts.target_resource
+    # =========================================================================
+    - name: "SA | INGREQ STOP - Publish results as AAP job artifact"
+      ansible.builtin.set_stats:
+        data:
+          target_resource: "{{ target_resource }}/{{ target_type }}/{{ target_system }}"
+          ingreq_stop_output: "{{ ingreq_stop_output.stdout_lines }}"
+          ingvote_output: "{{ ingvote_output.stdout_lines }}"

@@ -1,0 +1,79 @@
+---
+# =============================================================================
+# Playbook : sysauto_ingvote.yml
+# Purpose  : Issue F <proc>,INGVOTE to display the current vote table for
+#            SA z/OS-managed resources.
+#            When no resource is specified the command shows votes for ALL
+#            resources.  When a resource is specified (fully-qualified as
+#            <name>/<type>/<system>) it shows votes for that resource only.
+#            The raw vote table lines are published as an AAP job artifact so
+#            they are accessible via the AAP API at:
+#              GET /api/v2/jobs/<id>/   →  .artifacts.ingvote_output
+# Survey   :
+#   sa_proc          - SA z/OS started-task PROC name (default: AUTOPROC)
+#   target_resource  - Optional resource name (e.g. FTPSERVE)
+#   target_type      - Optional resource type (e.g. APL)  — used with name
+#   target_system    - Optional system name  (e.g. LTE1)  — used with name
+#
+# Note: INGVOTE requires a fully-qualified resource (<name>/<type>/<system>)
+# or no qualifier at all; partial qualifiers are not supported.  When any of
+# target_resource / target_type / target_system is blank the command runs
+# without a qualifier and shows all votes.
+# =============================================================================
+- name: SA | INGVOTE - Display vote table for SA z/OS resources
+  hosts: zos_host
+  environment: "{{ environment_vars }}"
+  gather_facts: false
+
+  vars:
+    # SA z/OS PROC name — survey may override.
+    sa_proc: "{{ sa_proc | default('AUTOPROC') }}"
+
+    # Resource qualifier fields — all optional.
+    target_resource: "{{ target_resource | default('') }}"
+    target_type:     "{{ target_type     | default('') }}"
+    target_system:   "{{ target_system   | default('') }}"
+
+  tasks:
+
+    # =========================================================================
+    # Decide whether to use a qualified resource argument.
+    # All three parts must be non-blank for a qualified call.
+    # =========================================================================
+    - name: "SA | Set INGVOTE command"
+      ansible.builtin.set_fact:
+        ingvote_cmd: >-
+          {{
+            'F ' + sa_proc + ',INGVOTE'
+            + (
+                (' ' + target_resource + '/' + target_type + '/' + target_system + ' OUTMODE=LINE')
+                if (
+                  target_resource | trim | length > 0 and
+                  target_type     | trim | length > 0 and
+                  target_system   | trim | length > 0
+                )
+                else ' OUTMODE=LINE'
+              )
+          }}
+
+    - name: "SA | INGVOTE - Issue command: {{ ingvote_cmd }}"
+      ibm.ibm_zos_core.zos_operator:
+        cmd: "{{ ingvote_cmd }}"
+        verbose: false
+      register: ingvote_output
+
+    - name: "SA | INGVOTE - Show raw vote table"
+      ansible.builtin.debug:
+        msg: "{{ ingvote_output.stdout_lines }}"
+
+    # =========================================================================
+    # Publish the raw vote table as an AAP artifact so it is visible
+    # in the job's API response:
+    #   GET /api/v2/jobs/<id>/  →  .artifacts.ingvote_output
+    #   GET /api/v2/jobs/<id>/  →  .artifacts.ingvote_command
+    # =========================================================================
+    - name: "SA | INGVOTE - Publish results as AAP job artifact"
+      ansible.builtin.set_stats:
+        data:
+          ingvote_command: "{{ ingvote_cmd }}"
+          ingvote_output: "{{ ingvote_output.stdout_lines }}"

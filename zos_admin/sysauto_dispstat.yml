@@ -1,0 +1,93 @@
+---
+# =============================================================================
+# Playbook : sysauto_dispstat.yml
+# Purpose  : Issue F <proc>,DISPSTAT to display the status of SA z/OS-managed
+#            resources and parse the response into a structured list.
+#            An optional filter can narrow output to a pattern (e.g. FTP*)
+#            or to a single task name (e.g. FTPSERVE).
+#            The parsed resource list is published as an AAP job artifact so it
+#            is accessible via the AAP API at:
+#              GET /api/v2/jobs/<id>/   →  .artifacts.sa_resources
+# Survey   :
+#   sa_proc       - SA z/OS started-task PROC name (default: AUTOPROC)
+#   dispstat_filter - Optional resource name or mask (e.g. FTP*, FTPSERVE).
+#                     Leave blank to display ALL resources.
+# =============================================================================
+- name: SA | DISPSTAT - Display resource statuses
+  hosts: zos_host
+  environment: "{{ environment_vars }}"
+  gather_facts: false
+
+  vars:
+    # SA z/OS PROC name — survey may override.
+    sa_proc: "{{ sa_proc | default('AUTOPROC') }}"
+
+    # Optional filter: blank = show all; set to a name or mask to narrow scope.
+    dispstat_filter: "{{ dispstat_filter | default('') }}"
+
+  tasks:
+
+    # =========================================================================
+    # Build the DISPSTAT command.  When dispstat_filter is set, append it after
+    # DISPSTAT so SA z/OS filters server-side (e.g. DISPSTAT FTP*).
+    # =========================================================================
+    - name: "SA | Set DISPSTAT command"
+      ansible.builtin.set_fact:
+        dispstat_cmd: >-
+          {{
+            'F ' + sa_proc + ',DISPSTAT'
+            + ((' ' + dispstat_filter) if dispstat_filter | trim | length > 0 else '')
+          }}
+
+    - name: "SA | DISPSTAT - Issue command: {{ dispstat_cmd }}"
+      ibm.ibm_zos_core.zos_operator:
+        cmd: "{{ dispstat_cmd }}"
+        verbose: false
+      register: dispstat_output
+
+    - name: "SA | DISPSTAT - Show raw operator response"
+      ansible.builtin.debug:
+        msg: "{{ dispstat_output.stdout_lines }}"
+
+    # =========================================================================
+    # Parse DISPSTAT output into sa_resources: [{resource, status, system}, ...]
+    # Valid data line example (after strip):
+    #   "FTPSERVE    UP       LTE1     FTPSERVE - - - - - -  MVS      --none--"
+    # Skip: blank, separator (---), footer (***), column header, console noise.
+    # =========================================================================
+    - name: "SA | DISPSTAT - Parse response into resource list"
+      ansible.builtin.set_fact:
+        sa_resources: >-
+          {{
+            sa_resources | default([]) + [{
+              'resource': (item | trim).split()[0],
+              'status':   (item | trim).split()[1],
+              'system':   (item | trim).split()[2]
+            }]
+          }}
+      loop: "{{ dispstat_output.stdout_lines }}"
+      when:
+        - item | trim | length > 0
+        - not (item | trim).startswith('-')
+        - not (item | trim).startswith('*')
+        - not (item | trim).startswith('Resource')
+        - not (item | trim).startswith('ISF')
+        - not (item | trim).startswith('LTE')
+        - not (item | trim is search('-F '))
+        - ((item | trim).split() | length) >= 3
+
+    - name: "SA | DISPSTAT - Show parsed resource list"
+      ansible.builtin.debug:
+        msg: "{{ sa_resources | default([]) }}"
+
+    # =========================================================================
+    # Publish the parsed resource list as an AAP artifact so it is visible
+    # in the job's API response:
+    #   GET /api/v2/jobs/<id>/  →  .artifacts.sa_resources
+    #   GET /api/v2/jobs/<id>/  →  .artifacts.dispstat_command
+    # =========================================================================
+    - name: "SA | DISPSTAT - Publish results as AAP job artifact"
+      ansible.builtin.set_stats:
+        data:
+          dispstat_command: "{{ dispstat_cmd }}"
+          sa_resources: "{{ sa_resources | default([]) }}"

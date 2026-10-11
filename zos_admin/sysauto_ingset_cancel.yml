@@ -1,0 +1,123 @@
+---
+# =============================================================================
+# Playbook : sysauto_ingset_cancel.yml
+# Purpose  : Cancel an operator-submitted MAKEUNAVAILABLE (STOP) vote for a
+#            specific SA z/OS resource using INGSET CANCEL.
+#
+#            INGSET CANCEL removes operator votes from the SA z/OS vote table.
+#            Once all STOP/MAKEUNAVAILABLE votes are cleared, SA z/OS can
+#            bring the resource back to its AVAILABLE desired state per the
+#            automation policy.  SOURCE=OPERATOR limits cancellation to votes
+#            cast by operators (not automation policies).
+#
+#            The INGSET response and the post-cancel INGLIST state are published
+#            as AAP job artifacts accessible via the AAP API at:
+#              GET /api/v2/jobs/<id>/   →  .artifacts.ingset_cancel_output
+#              GET /api/v2/jobs/<id>/   →  .artifacts.sa_inglist_post
+#              GET /api/v2/jobs/<id>/   →  .artifacts.target_resource
+#
+# Survey   :
+#   sa_proc         - SA z/OS started-task PROC name (default: AUTOPROC)
+#   target_resource - Resource name to cancel the vote for (required)
+#                     e.g. FTPSERVE
+#   target_type     - SA z/OS resource type (required) e.g. APL
+#   target_system   - System name the resource runs on (required) e.g. LTE1
+# =============================================================================
+- name: SA | INGSET CANCEL - Cancel operator STOP vote for a resource
+  hosts: zos_host
+  environment: "{{ environment_vars }}"
+  gather_facts: false
+
+  vars:
+    # SA z/OS PROC name — survey may override.
+    sa_proc: "{{ sa_proc | default('AUTOPROC') }}"
+
+    # All three resource qualifier fields are required for INGSET CANCEL.
+    target_resource: "{{ target_resource | default('') }}"
+    target_type:     "{{ target_type     | default('') }}"
+    target_system:   "{{ target_system   | default('') }}"
+
+  tasks:
+
+    - name: "SA | Validate that all resource qualifier fields are provided"
+      ansible.builtin.fail:
+        msg: >-
+          Survey variables 'target_resource', 'target_type', and 'target_system'
+          are all required for INGSET CANCEL.
+          Please re-run the job template and supply all three values.
+      when: >-
+        target_resource | trim | length == 0 or
+        target_type     | trim | length == 0 or
+        target_system   | trim | length == 0
+
+    # =========================================================================
+    # INGSET CANCEL - Remove the operator MAKEUNAVAILABLE (STOP) vote.
+    # Syntax:
+    #   F <proc>,INGSET CANCEL <resource>/<type>/<system>
+    #     REQUEST=MAKEUNAVAILABLE SOURCE=OPERATOR OUTMODE=LINE VERIFY=NO
+    # =========================================================================
+    - name: "SA | INGSET CANCEL - Cancel STOP vote for {{ target_resource }}/{{ target_type }}/{{ target_system }}"
+      ibm.ibm_zos_core.zos_operator:
+        cmd: >-
+          F {{ sa_proc }},INGSET CANCEL {{ target_resource }}/{{ target_type }}/{{ target_system }}
+          REQUEST=MAKEUNAVAILABLE SOURCE=OPERATOR OUTMODE=LINE VERIFY=NO
+        verbose: false
+      register: ingset_cancel_output
+
+    - name: "SA | INGSET CANCEL - Show operator response"
+      ansible.builtin.debug:
+        msg: "{{ ingset_cancel_output.stdout_lines }}"
+
+    # =========================================================================
+    # Post-cancel INGLIST - Confirm the resource's final state.
+    # =========================================================================
+    - name: "SA | INGLIST - Check {{ target_resource }} state after vote cancel"
+      ibm.ibm_zos_core.zos_operator:
+        cmd: "F {{ sa_proc }},INGLIST {{ target_resource }}/{{ target_type }}/{{ target_system }}"
+        verbose: false
+      register: inglist_post_output
+
+    - name: "SA | INGLIST - Parse final state for {{ target_resource }}"
+      ansible.builtin.set_fact:
+        sa_inglist_post: >-
+          {{
+            sa_inglist_post | default([]) + [{
+              'name':     (item | trim).split()[0],
+              'type':     (item | trim).split()[1],
+              'system':   (item | trim).split()[2],
+              'compound': (item | trim).split()[3],
+              'desired':  (item | trim).split()[4],
+              'observed': (item | trim).split()[5]
+            }]
+          }}
+      loop: "{{ inglist_post_output.stdout_lines }}"
+      when:
+        - item | trim | length > 0
+        - not (item | trim).startswith('-')
+        - not (item | trim).startswith('*')
+        - not (item | trim).startswith('Name')
+        - not (item | trim).startswith('ISF')
+        - not (item | trim).startswith('LTE')
+        - not (item | trim).startswith('Sysplex')
+        - not (item | trim).startswith('RESPONSE=')
+        - not (item | trim is search('-F '))
+        - ((item | trim).split() | length) >= 6
+        - (item | trim).split()[0] == target_resource
+
+    - name: "SA | INGLIST - Show final state of {{ target_resource }}"
+      ansible.builtin.debug:
+        msg: "{{ sa_inglist_post | default([]) }}"
+
+    # =========================================================================
+    # Publish the INGSET response and the confirmed post-cancel state as AAP
+    # artifacts visible in the job's API response:
+    #   GET /api/v2/jobs/<id>/  →  .artifacts.target_resource
+    #   GET /api/v2/jobs/<id>/  →  .artifacts.ingset_cancel_output
+    #   GET /api/v2/jobs/<id>/  →  .artifacts.sa_inglist_post
+    # =========================================================================
+    - name: "SA | INGSET CANCEL - Publish results as AAP job artifact"
+      ansible.builtin.set_stats:
+        data:
+          target_resource: "{{ target_resource }}/{{ target_type }}/{{ target_system }}"
+          ingset_cancel_output: "{{ ingset_cancel_output.stdout_lines }}"
+          sa_inglist_post: "{{ sa_inglist_post | default([]) }}"

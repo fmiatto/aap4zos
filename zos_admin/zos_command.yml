@@ -1,0 +1,52 @@
+---
+# =============================================================================
+# Playbook : sysauto_zos_command.yml
+# Purpose  : Generic z/OS operator command issuer via AAP survey.
+#            The full operator command string is passed in as a survey variable.
+#            The command issued and its raw output are published as AAP job
+#            artifacts accessible via the AAP API at:
+#              GET /api/v2/jobs/<id>/   →  .artifacts.zos_command
+#              GET /api/v2/jobs/<id>/   →  .artifacts.zos_command_output
+# Survey   :
+#   zos_command  - Full operator command to issue (required)
+#                  Example: "D A,L"  or  "F AUTOPROC,DISPSTAT"
+# =============================================================================
+- name: SA | Generic z/OS Operator Command Issuer
+  hosts: zos_host
+  environment: "{{ environment_vars }}"
+  gather_facts: false
+
+  vars:
+    # Populated by AAP survey; no meaningful default — command must be supplied.
+    zos_command: "{{ zos_command | default('') }}"
+
+  tasks:
+
+    - name: "SA | Validate that a command was provided"
+      ansible.builtin.fail:
+        msg: >-
+          Survey variable 'zos_command' is required but was not set.
+          Please re-run the job template and provide the operator command.
+      when: zos_command | trim | length == 0
+
+    - name: "SA | Issue operator command: {{ zos_command }}"
+      ibm.ibm_zos_core.zos_operator:
+        cmd: "{{ zos_command }}"
+        verbose: false
+      register: cmd_output
+
+    - name: "SA | Show raw operator response"
+      ansible.builtin.debug:
+        msg: "{{ cmd_output.stdout_lines }}"
+
+    # =========================================================================
+    # Publish the command and its raw output as AAP artifacts visible in the
+    # job's API response:
+    #   GET /api/v2/jobs/<id>/  →  .artifacts.zos_command
+    #   GET /api/v2/jobs/<id>/  →  .artifacts.zos_command_output
+    # =========================================================================
+    - name: "SA | Publish results as AAP job artifact"
+      ansible.builtin.set_stats:
+        data:
+          zos_command: "{{ zos_command }}"
+          zos_command_output: "{{ cmd_output.stdout_lines }}"
