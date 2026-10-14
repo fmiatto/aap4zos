@@ -1,0 +1,63 @@
+{#
+  =============================================================================
+  Template : apl.txt.j2
+  Purpose  : SA z/OS "Making Updates with Text Files" input that creates the
+             APG and APLs described in vars/new_apl.yml.
+  Rules    : NEW / UPD / COPY / WHERE_USED / LINK_TO_CLASS start in column 1.
+             Policy item lines are indented 1-2 columns, field lines 3+.
+             The APG section comes first so the APLs can link to it.
+  =============================================================================
+#}
+{% set p = sa_new_policy %}
+{% macro kv(key, value, indent=2, col=20) %}{{ ' ' * indent }}{{ '%-*s' | format(col - indent, key) }}: {{ value }}{% endmacro %}
+NEW APG             : {{ p.apg.name }}
+{{ kv('Type', p.apg.type) }}
+{{ kv('Nature', p.apg.nature) }}
+{{ kv('Short description', p.apg.description) }}
+{% for sys in p.apg.systems %}
+WHERE_USED SYS      : {{ sys }}
+{% endfor %}
+{% for apl in p.apls %}
+
+NEW APL             : {{ apl.name }}
+{{ kv('Subsystem Name', apl.subsystem) }}
+{{ kv('Category', apl.category) }}
+{{ kv('Subcategory', apl.subcategory) }}
+{{ kv('Job Type', apl.job_type) }}
+{{ kv('Job Name', apl.job_name) }}
+{{ kv('Short description', apl.description) }}
+{% if apl.link_to_class | default('') | length > 0 %}
+LINK_TO_CLASS       : {{ apl.link_to_class }}
+{% endif %}
+WHERE_USED APG      : {{ p.apg.name }}
+{% endfor %}
+{% for apl in p.apls %}
+{%   set do_info = p.update_sections.application_info and (apl.command_prefix | default('') | length > 0) %}
+{%   set do_rels = p.update_sections.relationships and (apl.relationships | default([]) | length > 0) %}
+{%   if do_info or do_rels %}
+
+UPD APL             : {{ apl.name }}
+{%     if do_info %}
+ APPLICATION INFO (FIELD)
+{{ kv('Command Prefix', apl.command_prefix, 3, 25) }}
+{%     endif %}
+{#   Layout from SINGSAMP(INGEFUJ3): each relationship is exactly 7 data
+     lines in this order (empty values allowed), separated by a "*" line.
+     "policy replacement" replaces all relationships of the APL. #}
+{%     if do_rels %}
+  RELATIONSHIPS                      ( policy replacement )
+{%       for rel in apl.relationships %}
+{%         if not loop.first %}
+*
+{%         endif %}
+{{ kv('Relationship Type', rel.type, 4, 37) }}
+{{ kv('Supporting Resource', rel.resource, 4, 37) }}
+{{ kv('Description', rel.description | default(''), 4, 37) }}
+{{ kv('Sequence Number', rel.sequence | default(''), 4, 37) }}
+{{ kv('Automation', rel.automation | default(''), 4, 37) }}
+{{ kv('Chaining', rel.chaining | default(''), 4, 37) }}
+{{ kv('Condition', rel.condition | default(''), 4, 37) }}
+{%       endfor %}
+{%     endif %}
+{%   endif %}
+{% endfor %}

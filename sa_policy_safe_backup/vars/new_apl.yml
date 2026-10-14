@@ -1,0 +1,92 @@
+---
+# =============================================================================
+# File    : vars/new_apl.yml
+# Purpose : The new SA z/OS policy objects for DB2 subsystem DBA1 on LTE1.
+#
+# Evidence from LTE1 (SA_SYSTEM_DATA.md, 2026-10-13):
+#   D A,L  -> DBA1MSTR (IEFPROC), DBA1DBM1 (IEFPROC), DBA1IRLM, DBA1DIST
+#             running as STCs.  DBA1ADMT is not running, so it is left out.
+#   D O    -> command prefix -DBA1, owner DBA1MSTR, scope SYSTEM.
+#   Dialog -> no DBA1* APL exists yet.  The PDB already holds the DB2 classes
+#             C_DB2_MSTR, C_DB2_NORM, C_DB2_LITE and C_DB2_DEPENDENTS.
+#
+# Design (SA_POLICY.md section 3, P2):
+#   - Each APL links to an existing DB2 class, so the text file carries only
+#     identity, the class link, APG membership and instance relationships.
+#   - One new SYSTEM/BASIC APG links the four APLs to system LTE1.
+#
+# Field names follow the NEW panel ("Making Updates with Text Files").
+# Keep update_sections in step with a live export of a similar APL before
+# applying to production (SA_POLICY.md section 7).
+# =============================================================================
+sa_new_policy:
+
+  # Member of <HLQ>.SAPDB.WORK that receives the rendered text file
+  textfile_member: DBA1APL
+
+  apg:
+    name: DBA1_DB2
+    type: SYSTEM
+    nature: BASIC
+    description: DB2 subsystem DBA1
+    systems:
+      - LTE1
+
+  apls:
+    - name: DBA1MSTR
+      subsystem: DBA1MSTR
+      job_name: DBA1MSTR
+      job_type: MVS
+      category: DB2
+      subcategory: MSTR
+      link_to_class: C_DB2_NORM       # Normal start mode (C_DB2_MSTR holds the basics)
+      description: DB2 DBA1 - system services (MSTR)
+      command_prefix: "-DBA1"
+      relationships: []
+
+    - name: DBA1IRLM
+      subsystem: DBA1IRLM
+      job_name: DBA1IRLM
+      job_type: MVS
+      category: DB2
+      subcategory: IRLM
+      link_to_class: C_DB2_DEPENDENTS
+      description: DB2 DBA1 - lock manager (IRLM)
+      relationships:
+        - { type: HASPARENT, resource: DBA1MSTR/APL/=, condition: StartsMeAndStopsMe }
+
+    - name: DBA1DBM1
+      subsystem: DBA1DBM1
+      job_name: DBA1DBM1
+      job_type: MVS
+      category: DB2
+      subcategory: DBM1
+      link_to_class: C_DB2_DEPENDENTS
+      description: DB2 DBA1 - database services (DBM1)
+      relationships:
+        - { type: HASPARENT, resource: DBA1MSTR/APL/=, condition: StartsMeAndStopsMe }
+
+    - name: DBA1DIST
+      subsystem: DBA1DIST
+      job_name: DBA1DIST
+      job_type: MVS
+      category: DB2
+      subcategory: DIST
+      link_to_class: C_DB2_DEPENDENTS
+      description: DB2 DBA1 - distributed data (DIST)
+      relationships:
+        - { type: HASPARENT, resource: DBA1MSTR/APL/=, condition: StartsMeAndStopsMe }
+
+  # UPD sections rendered after the NEW sections.  Turn one off if the class
+  # already carries that policy, or while you confirm its keyword format.
+  update_sections:
+    application_info: true            # Command Prefix on APLs that set command_prefix
+    relationships: true               # HASPARENT links between the instances
+
+# P5 (50_validate.yml): members that change for this policy without naming
+# the new entries, each with the reason it is expected.  Add one only after
+# reading its diff in the P5 report.  member: "reason"
+sa_validate_explanations:
+  ACFMZ999: "Automation table: only added DB2 message entries (DSNB250E, DSNB311I-DSNB351I, DSNJ115I) from the C_DB2_* classes, now included by ACFZ999 because the DBA1 APLs link to them"
+  ACFTZ999: "Message revision table: the same DB2 message IDs added, nothing removed"
+  MPFLSTSA: "MPF list: the same DB2 message IDs added, nothing removed"

@@ -1,0 +1,57 @@
+---
+# =============================================================================
+# render.yml - Validate vars/new_apl.yml and render templates/apl.txt.j2.
+#   Sets: sa_textfile (rendered text), sa_new_names (every new entry, subsystem
+#         and job name, used by later checks).
+# =============================================================================
+- name: "SA POLICY | Validate APG definition {{ sa_new_policy.apg.name }}"
+  ansible.builtin.assert:
+    that:
+      - sa_new_policy.apg.name | length <= 20
+      - sa_new_policy.apg.type in ['SYSTEM', 'SYSPLEX']
+      - sa_new_policy.apg.nature in ['BASIC', 'MOVE', 'SERVER']
+      - sa_new_policy.apg.description | length <= 40
+      - sa_new_policy.apg.systems | length > 0
+    fail_msg: "APG {{ sa_new_policy.apg.name }} has an invalid field (see vars/new_apl.yml)."
+    quiet: true
+
+- name: "SA POLICY | Validate APL definitions"
+  ansible.builtin.assert:
+    that:
+      - item.name is match('^[A-Z@#$][A-Z0-9@#$_]{0,19}$')
+      - item.subsystem is match('^[A-Z@#$][A-Z0-9@#$]{0,10}$')
+      - item.job_name is match('^[A-Z@#$][A-Z0-9@#$]{0,7}$')
+      - item.job_type in ['MVS', 'NONMVS', 'TRANSIENT']
+      - item.description | length <= 40
+      - item.subcategory | length > 0
+    fail_msg: "APL {{ item.name }} has an invalid field (see vars/new_apl.yml)."
+    quiet: true
+  loop: "{{ sa_new_policy.apls }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: "SA POLICY | Validate names are unique"
+  ansible.builtin.assert:
+    that:
+      - sa_new_policy.apls | map(attribute='name') | unique | length == sa_new_policy.apls | length
+      - sa_new_policy.apls | map(attribute='job_name') | unique | length == sa_new_policy.apls | length
+    fail_msg: "Duplicate APL entry or job names in vars/new_apl.yml."
+    quiet: true
+
+- name: "SA POLICY | Render text file from templates/apl.txt.j2"
+  ansible.builtin.set_fact:
+    sa_textfile: "{{ lookup('ansible.builtin.template', playbook_dir ~ '/../templates/apl.txt.j2') | trim }}"
+    sa_new_names: >-
+      {{ ([sa_new_policy.apg.name]
+          + (sa_new_policy.apls | map(attribute='name') | list)
+          + (sa_new_policy.apls | map(attribute='subsystem') | list)
+          + (sa_new_policy.apls | map(attribute='job_name') | list)) | unique }}
+
+# The PDB work data set is FB 80; the update syntax needs keywords in col 1.
+- name: "SA POLICY | Check rendered text file layout"
+  ansible.builtin.assert:
+    that:
+      - sa_textfile.splitlines() | map('length') | max <= 80
+      - sa_textfile.splitlines() | select('match', '^(NEW|UPD) ') | list | length >= sa_new_policy.apls | length + 1
+    fail_msg: "Rendered text file has lines over 80 columns or missing NEW/UPD sections."
+    quiet: true

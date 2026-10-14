@@ -1,0 +1,76 @@
+---
+# =============================================================================
+# File    : vars/policies/cics62.yml   (sa_policies name: cics62)
+# Purpose : CICS region CICS62 on LTE1, started only when DB2 DBA1 is fully up.
+#           Needs the APG DBA1_DB2: list db2-dba1 before cics62 in
+#           sa_policies, or add DB2 in an earlier run.
+#
+# From LTE1:
+#   D A,CICS*  -> CICS62 runs as an STC (PROC CICS62 in SYS1.USER.PROCLIB,
+#                 PGM=DFHSIP,PARM=SI); SA did not know it (AOF332I).
+#   C_CICS     -> existing class "Class for CICS", TYPE=CICS: STARTUP
+#                 AUTO/COLD/INITIAL/NORM  MVS S &SUBSJOB,PARM='SI,START=...',
+#                 CICS message handling, replies DFHSI1578D GO, DFHKE0408D ASIS.
+#                 It has no shutdown commands (CICS0001 defines its own
+#                 SHUTNORM: CEMT P SHUT / CEMT P SHUT IMMED / C &SUBSJOB).
+#
+# HASPARENT on the APG BASE_SYS: a BASIC APG is AVAILABLE only when all its
+# members are, so SA starts CICS62 after Basic z/OS tasks
+# =============================================================================
+# CICS62 is new to SA on the system: full add, NEW + UPD sections.
+# true would write only the UPD sections (entries that already exist).
+# -e sa_update_only=true on the command line overrides this for every file.
+sa_update_only: false
+
+sa_new_policy:
+
+  apg:
+    name: CICS62_CICS
+    type: SYSTEM
+    nature: BASIC
+    description: CICS region CICS62
+    systems:
+      - LTE1
+
+  apls:
+    - name: CICS62
+      subsystem: CICS62
+      job_name: CICS62
+      job_type: MVS
+      category: CICS                  # TYPE=CICS, no subtype (as CICS0001)
+      link_to_class: C_CICS
+      description: CICS region CICS62
+      relationships:
+        - { type: HASPARENT, resource: BASE_SYS/APG/= }
+      # Same shutdown as the existing APL CICS0001 (C_CICS has none).
+      # Each phase: NORM | IMMED | FORCE; each pass: pass number, command,
+      # optional function (Automated Function/'*').
+      shutdown:
+        - phase: NORM
+          passes:
+            - { pass: 1, command: "MVS F &SUBSJOB,CEMT P SHUT" }
+            - { pass: 2, command: "MVS F &SUBSJOB,CEMT P SHUT IMMED" }
+            - { pass: 4, command: "MVS C &SUBSJOB" }
+
+  # ---------------------------------------------------------------------------
+  # update_sections - which UPD sections the text file gets.
+  #   The NEW sections create the APG and the APL (identity, class link, APG
+  #   membership).  Everything else is written afterwards in one "UPD APL"
+  #   section per APL, made of the parts switched on here.  A part is only
+  #   written for APLs that have data for it.
+  #     application_info  command_prefix / restart_after_ipl
+  #                       (field replacement: only these fields change)
+  #     relationships     relationships:
+  #                       (policy replacement: replaces ALL relationships of
+  #                       the APL, so list every one it should have)
+  #     shutdown          shutdown:
+  #                       (block replacement: replaces the APL's shutdown
+  #                       commands)
+  #   sa_update_only: false (top of this file), so it is a full add: NEW + UPD.
+  #   With sa_update_only: true (file or -e) only the UPD sections are
+  #   written, to change an APL that already exists.
+  # ---------------------------------------------------------------------------
+  update_sections:
+    application_info: false           # nothing to set
+    relationships: true               # CICS62 -> DBA1_DB2 group
+    shutdown: true                    # C_CICS has no shutdown commands

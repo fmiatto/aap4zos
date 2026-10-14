@@ -1,0 +1,62 @@
+---
+# =============================================================================
+# render_one.yml - Load vars/policies/<sa_policy_name>.yml, check it and
+#   render it with templates/apl.txt.j2.  Called by render.yml per policy.
+#   A policy is update-only (UPD sections only, no apg: needed) when its
+#   file sets sa_update_only: true or when -e sa_update_only=true is given.
+# =============================================================================
+- name: "SA | Load policy {{ sa_policy_name }}"
+  ansible.builtin.include_vars:
+    file: "{{ playbook_dir }}/../vars/policies/{{ sa_policy_name }}.yml"
+    name: sa_pol
+
+- name: "SA | Policy {{ sa_policy_name }}"
+  ansible.builtin.set_fact:
+    sa_pol_policy: "{{ sa_pol.sa_new_policy }}"
+    sa_pol_update_only: >-
+      {{ (sa_update_only | default(false) | bool) or (sa_pol.sa_update_only | default(false) | bool) }}
+
+- name: "SA | {{ sa_policy_name }}: check the APG"
+  ansible.builtin.assert:
+    that:
+      - sa_pol_policy.apg.name | length <= 20
+      - sa_pol_policy.apg.type in ['SYSTEM', 'SYSPLEX']
+      - sa_pol_policy.apg.nature in ['BASIC', 'MOVE', 'SERVER']
+      - sa_pol_policy.apg.description | length <= 40
+      - sa_pol_policy.apg.systems | length > 0
+    fail_msg: "{{ sa_policy_name }}: APG {{ sa_pol_policy.apg.name | default('(missing)') }} has an invalid field."
+    quiet: true
+  when: not sa_pol_update_only | bool
+
+- name: "SA | {{ sa_policy_name }}: check the APLs"
+  ansible.builtin.assert:
+    that:
+      - item.subsystem is match('^[A-Z@#$][A-Z0-9@#$]{0,10}$')
+      - item.job_name is match('^[A-Z@#$][A-Z0-9@#$]{0,7}$')
+      - item.job_type in ['MVS', 'NONMVS', 'TRANSIENT']
+      - item.description | length <= 40
+    fail_msg: "{{ sa_policy_name }}: APL {{ item.name }} has an invalid field."
+    quiet: true
+  loop: "{{ sa_pol_policy.apls }}"
+  loop_control:
+    label: "{{ item.name }}"
+  when: not sa_pol_update_only | bool
+
+- name: "SA | {{ sa_policy_name }}: APL names valid and unique"
+  ansible.builtin.assert:
+    that:
+      - sa_pol_policy.apls | map(attribute='name') | select('match', '^[A-Z@#$][A-Z0-9@#$_]{0,19}$') | list | length == sa_pol_policy.apls | length
+      - sa_pol_policy.apls | map(attribute='name') | unique | length == sa_pol_policy.apls | length
+    fail_msg: "{{ sa_policy_name }}: invalid or duplicate APL entry names."
+    quiet: true
+
+- name: "SA | {{ sa_policy_name }}: render templates/apl.txt.j2"
+  ansible.builtin.set_fact:
+    sa_textfile_parts: >-
+      {{ sa_textfile_parts + [lookup('ansible.builtin.template',
+           playbook_dir ~ '/../templates/apl.txt.j2',
+           template_vars={'sa_new_policy': sa_pol_policy, 'sa_update_only': sa_pol_update_only | bool}) | trim] }}
+    sa_inglist_names: >-
+      {{ sa_inglist_names
+         + ([sa_pol_policy.apg.name] if (sa_pol_policy.apg is defined and not sa_pol_update_only | bool) else [])
+         + (sa_pol_policy.apls | map(attribute='name') | list) }}

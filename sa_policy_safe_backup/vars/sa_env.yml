@@ -1,0 +1,171 @@
+---
+# =============================================================================
+# File    : vars/sa_env.yml
+# Purpose : Environment facts for the SA z/OS policy prototype on LTE1.
+#           Values come from SA_SYSTEM_DATA.md (DISPSYS / ACF STATUS / INGAMS /
+#           LISTDS captured 2026-10-13).  Any of them can be overridden from an
+#           AAP survey or extra vars (extra vars win over vars_files).
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# SA z/OS runtime (read from the live system)
+# ---------------------------------------------------------------------------
+sa_proc: AUTOPROC                 # NetView/SA agent STC (F AUTOPROC,...)
+sa_system: LTE1                   # DISPSYS System
+sa_sysplex: LTEPLEX               # DISPSYS Sysplex Group
+sa_release: V4R3M0                # IBM Z System Automation 4.3 (INGAMS Release)
+
+# ---------------------------------------------------------------------------
+# Production artifacts. NEVER written by playbooks 00-50 (guards enforce it).
+# ---------------------------------------------------------------------------
+sa_pdb_name: LTEPLEX_PDB          # Policy Database name in the dialog
+sa_pdb_dsn: SYSAUTO.PDB           # Policy Database data set (FB 80 PO, LTECAT)
+sa_config_gdg_base: SYSAUTO.PDB.SOCNTL   # Build output GDG; active gen read from ACF STATUS
+
+# ---------------------------------------------------------------------------
+# Libraries
+#   The system runs SA 4.3, so use SYS1.ING.*.  SYS1.ING.V4R4M0.* is a staged
+#   4.4 install and must NOT be used to drive a 4.3 policy database.
+# ---------------------------------------------------------------------------
+sa_dialog_hlq: SYS1.ING
+sa_singsamp: "{{ sa_dialog_hlq }}.SINGSAMP"
+# ISPF libraries on LTE1 are SYS1.ISP.SISP*ENU, not the sample default ISP.
+sa_ispf_hlq: SYS1.ISP
+# Read-only search path: 00_discover.yml lists and prints the DBA1* procs it
+# finds here, to show which library each running STC was started from.
+# Nothing is ever written to these libraries.  Same order as JES2 PROC00
+# ($D PROCLIB), so the first hit is the member JES2 actually uses.
+sa_proclibs:
+  - SYS1.USER.PROCLIB
+  - SYS1.PROCLIB
+  - SYS1.IBM.PROCLIB
+
+# Libraries searched by 00_discover for the P3 batch mechanism (the "spike").
+# Members of SINGSAMP matching INGEB* are listed and printed; members of the
+# other libraries are printed only when they contain the string ISPSTART.
+sa_spike_libraries:
+  - "{{ sa_dialog_hlq }}.SINGSAMP"
+  - "{{ sa_dialog_hlq }}.SINGISKL"
+
+# ISPF/SA dialog allocations for the batch (IKJEFT01 + ISPSTART) steps.
+sa_dialog_libs:
+  - { dd: STEPLIB, dsns: ["{{ sa_dialog_hlq }}.SINGMOD1"] }
+  - { dd: SYSPROC, dsns: ["{{ sa_dialog_hlq }}.SINGIREX"] }
+  - { dd: ISPPLIB, dsns: ["{{ sa_dialog_hlq }}.SINGIPNL", "{{ sa_ispf_hlq }}.SISPPENU"] }
+  - { dd: ISPMLIB, dsns: ["{{ sa_dialog_hlq }}.SINGIMSG", "{{ sa_ispf_hlq }}.SISPMENU"] }
+  - { dd: ISPSLIB, dsns: ["{{ sa_dialog_hlq }}.SINGISKL", "{{ sa_ispf_hlq }}.SISPSENU"] }
+  - { dd: ISPTLIB, dsns: ["{{ sa_dialog_hlq }}.SINGITBL", "{{ sa_ispf_hlq }}.SISPTENU"] }
+
+# ---------------------------------------------------------------------------
+# Work data sets. All prototype output lives under this HLQ.
+#   <HLQ>.SAPDB.PROTO              clone of the PDB (all changes go here)
+#   <HLQ>.SAPDB.PROTO.SOCNTL       staging build output
+#   <HLQ>.SAPDB.WORK               rendered text file, JCL and reports
+#   <HLQ>.SAPDB.BKP.Dyymmdd.Thhmm  Backup A (PDB)            + .MF manifest
+#   <HLQ>.SOCNTL.BKP.Dyymmdd.Thhmm Backup B (active config)  + .MF manifest
+# Confirm with security that the Ansible user ID has ALTER on this HLQ only.
+# ---------------------------------------------------------------------------
+sa_work_hlq: SYSAUTO.PROTO
+
+# ---------------------------------------------------------------------------
+# Batch jobs
+# ---------------------------------------------------------------------------
+# Job card for every submitted job (templates/jobcard.j2):
+#   //SAPTXUPD JOB MSGCLASS=X,CLASS=A,NOTIFY=&SYSUID,
+#   //         REGION=0M,TIME=NOLIMIT
+# &SYSUID is the user ID that submits the job (ansible_user), so the TSO
+# notification goes to that user; set notify to a TSO user ID to send it
+# elsewhere, or to '' to drop NOTIFY.
+sa_job:
+  prefix: SAP                     # job name = prefix + phase suffix, max 8 chars
+  account: ''                     # optional: (account) positional field
+  programmer: ''                  # optional: 'programmer' positional field
+  class: A
+  msgclass: X
+  notify: '&SYSUID'
+  region: 0M
+  time: NOLIMIT
+  poll_retries: 60                # 60 x 10s = 10 minutes
+  poll_delay: 10
+
+# Messages in non-JES DDs that fail a step (plan: fail on any warning/error).
+# Besides message IDs, the SA dialog writes plain-text ISPLOG lines such as
+# "ERROR (Line 53): ...", "WARNING: Update not run.", ".......WARNING.
+# Truncation occurred" and "REXX error condition SYNTAX" - the last one
+# with the job still ending CC 0 (APL extract, JOB00502).
+sa_fail_message_regex: '\b(AOF|ING|ISP|IKJ)[A-Z0-9]{3,6}[EWS]\b|\bERROR\b|\bWARNING\b|REXX error condition|Invalid data set status'
+
+# ---------------------------------------------------------------------------
+# P3 - Unattended text-file update (THE SPIKE)
+#   Run 00_discover.yml first: it prints every INGEB* sample in SINGSAMP and
+#   every SINGISKL skeleton that contains ISPSTART (the dialog builds its
+#   batch text-update job from one of those).  Copy the step's DD statements
+#   and SYSTSIN into the keys below, then set verified: true.
+#   Until then 30_apply_to_pdb.yml stops before submitting anything.
+#   Point every PDB reference at the CLONE ({{ sa_clone_dsn }} /
+#   {{ sa_clone_pdb_name }}); the JCL guard rejects production names.
+# ---------------------------------------------------------------------------
+sa_clone_pdb_name: LTEPLEX_PROTO  # Name to register the clone under in the dialog
+sa_textupd:
+  verified: false
+  max_rc: 0
+  dd:                              # Extra DDs: name + everything after "DD "
+    - name: TEXTIN
+      spec: "DISP=SHR,DSN={{ sa_work_pds }}({{ sa_new_policy.textfile_member }})"
+  systsin: []
+  # Example shape only; take the real command and keywords from the spike:
+  # systsin:
+  #   - "ISPSTART CMD(<text-update-exec> -"
+  #   - "  PDB({{ sa_clone_dsn }}) -"
+  #   - "  INPUT({{ sa_work_pds }}({{ sa_new_policy.textfile_member }})) -"
+  #   - "  MODE(UPDATE))"
+
+# ---------------------------------------------------------------------------
+# P4 - Batch build (INGEBBLD)
+#   Copy the SYSTSIN / PARM of SINGSAMP(INGEBBLD) (printed by 00_discover) or
+#   of the site build job ZECOADM uses today, pointed at the clone and the
+#   staging data set, then set verified: true.
+#   {{ sa_build_type_effective }} is ALL for the first build into an empty
+#   staging data set (IBM rule) and sa_build.type afterwards.
+# ---------------------------------------------------------------------------
+sa_build:
+  verified: false
+  max_rc: 0
+  type: MOD
+  dd: []
+  systsin: []
+  # Example shape only; confirm keywords against SINGSAMP(INGEBBLD):
+  # systsin:
+  #   - "ISPSTART CMD(INGEBBLD -"
+  #   - "  SOURCE={{ sa_clone_pdb_name }} -"
+  #   - "  OUTDSN={{ sa_staging_dsn }} -"
+  #   - "  TYPE={{ sa_build_type_effective }} -"
+  #   - "  SYSPLEX={{ sa_sysplex }})"
+
+# ---------------------------------------------------------------------------
+# P5 - Validation
+# ---------------------------------------------------------------------------
+sa_validate_strict: false          # true = fail on changed members that do not reference the new APLs
+sa_validate_diff_lines: 200        # max diff lines shown per member
+# Lines every build rewrites; a member whose only differences are these is
+# "build stamp only" (seen on LTE1: fragment line 1 "*- Z99BAAPL <stamp> ---",
+# "* Built : <user> <date>", the ACFMZ999 date line, the AOFACFMP header
+# with the PDB name / data set, the ACF/CFG/LGC levels, and the two
+# trailing "*<36 hex>" checksum lines SA writes over the member's content).
+sa_validate_stamp_regex: >-
+  ^\*- [A-Z0-9@#$]+ [0-9]{14} -|^\* Built :|^\* [0-9]{2}/[0-9]{2}/[0-9]{2}, [0-9]{2}:[0-9]{2}, |^\* Generated at |^\* Policy Database:|^\* Data Set Name  :|ACFLEVEL|CFGLEVEL|LGCLEVEL|^\*[0-9A-F]{36} *$
+# Automation Manager configuration members (binary, rebuilt by every build):
+# HSAZ999, Z999CRES, Z999CSCH, Z999CLGC.
+sa_validate_am_regex: '^(HSA[A-Z0-9@#$]*|Z[A-Z0-9@#$]{3}C[A-Z0-9@#$]{3})$'
+
+# ---------------------------------------------------------------------------
+# P6 - Activation (60_activate.yml)
+#   The new generation is allocated like the active one on LTE1:
+#   SYSAUTO.PDB.SOCNTL.G0016V00 is a non-SMS PDSE (DSNTYPE=LIBRARY) on
+#   volume LTECAT (read from the active generation at run time), 3390,
+#   33,998,400 bytes = 40 cylinders primary, 20 cylinders secondary.
+#   The directory quantity is ignored for a PDSE.
+# ---------------------------------------------------------------------------
+sa_p6_gen_unit: "3390"
+sa_p6_gen_space: "CYL,(40,20,10)"
+sa_p6_refresh_wait: 30             # seconds to collect the INGAMS REFRESH response

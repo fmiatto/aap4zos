@@ -1,0 +1,26 @@
+---
+# =============================================================================
+# Playbook : site_prototype.yml
+# Purpose  : Run the whole prototype in order (P0 -> P5) from the command line.
+#            In AAP, chain the individual job templates in a workflow instead,
+#            so each phase is its own checkpoint.
+#   (from the repository root)
+#   ansible-playbook -i sa_policy/inventory/inventory.yml sa_policy/playbooks/site_prototype.yml
+# =============================================================================
+- name: P0 Discover
+  ansible.builtin.import_playbook: 00_discover.yml
+
+- name: P1 Backup and clone
+  ansible.builtin.import_playbook: 10_backup_clone.yml
+
+- name: P2 Render
+  ansible.builtin.import_playbook: 20_render_apl.yml
+
+- name: P3 Apply to the clone
+  ansible.builtin.import_playbook: 30_apply_to_pdb.yml
+
+- name: P4 Build to staging
+  ansible.builtin.import_playbook: 40_build_staging.yml
+
+- name: P5 Validate
+  ansible.builtin.import_playbook: 50_validate.yml

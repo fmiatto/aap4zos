@@ -1,0 +1,70 @@
+---
+# =============================================================================
+# Playbook : 20_render_apl.yml                                   Phase P2
+# Purpose  : Validate vars/new_apl.yml and render templates/apl.txt.j2 into the
+#            SA z/OS text-file update for the DB2 DBA1 APG and APLs.
+#            Optional checkpoint: when sa_reference_export_dsn names a text
+#            export of a similar APL (dialog Data Management), the rendered
+#            file is diffed against it on z/OS so only intended differences
+#            remain.  Nothing is written to any data set.
+#            Results are published as AAP job artifacts:
+#              GET /api/v2/jobs/<id>/  ->  .artifacts.sa_textfile
+# Survey   :
+#   sa_reference_export_dsn - Optional DSN(MEMBER) of a dialog text export
+# =============================================================================
+- name: SA POLICY | P2 Render - Author the DB2 DBA1 APL text file
+  hosts: zos_host
+  environment: "{{ environment_vars }}"
+  gather_facts: false
+  vars_files:
+    - ../vars/sa_env.yml
+    - ../vars/new_apl.yml
+
+  tasks:
+
+    - name: "SA POLICY | Derive data set names"
+      ansible.builtin.include_role:
+        name: "{{ playbook_dir }}/../roles/sa_policy_common"
+        tasks_from: naming
+
+    - name: "SA POLICY | Validate and render the text file"
+      ansible.builtin.include_role:
+        name: "{{ playbook_dir }}/../roles/sa_policy_common"
+        tasks_from: render
+
+    - name: "SA POLICY | P2 - Show rendered text file"
+      ansible.builtin.debug:
+        msg: "{{ sa_textfile.splitlines() }}"
+
+    # =========================================================================
+    # Checkpoint: diff against a live export of a similar APL (optional)
+    # =========================================================================
+    - name: "SA POLICY | P2 - Diff against reference export {{ sa_reference_export_dsn | default('') }}"
+      ansible.builtin.shell: |
+        t=/tmp/sapolicy.$$
+        mkdir -p "$t"
+        cat > "$t/new.txt" <<'SAPOLICY_EOF'
+        {{ sa_textfile }}
+        SAPOLICY_EOF
+        dcat "{{ sa_reference_export_dsn }}" | sed 's/ *$//' > "$t/ref.txt"
+        diff "$t/ref.txt" "$t/new.txt" || true
+        rm -rf "$t"
+      register: sa_ref_diff
+      changed_when: false
+      when: sa_reference_export_dsn | default('') | length > 0
+
+    - name: "SA POLICY | P2 - Show differences from the reference export"
+      ansible.builtin.debug:
+        msg: "{{ sa_ref_diff.stdout_lines }}"
+      when: sa_ref_diff.stdout_lines is defined
+
+    # =========================================================================
+    # Publish the rendered file (the build artifact):
+    #   GET /api/v2/jobs/<id>/  ->  .artifacts.sa_textfile
+    # =========================================================================
+    - name: "SA POLICY | P2 - Publish rendered text file as AAP job artifact"
+      ansible.builtin.set_stats:
+        data:
+          sa_textfile: "{{ sa_textfile }}"
+          sa_textfile_target: "{{ sa_work_pds }}({{ sa_new_policy.textfile_member }})"
+          sa_new_names: "{{ sa_new_names }}"

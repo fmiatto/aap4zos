@@ -1,0 +1,342 @@
+---
+# =============================================================================
+# Playbook : 60_activate.yml                                     Phase P6
+# Purpose  : Activate the validated production build on the running system.
+#            Run after, in the same change window:
+#              10_backup_clone.yml                       fresh Backup A / B
+#              30_apply_to_pdb.yml   -e sa_target=production ...
+#              40_build_staging.yml  -e sa_target=production ...
+#              50_validate.yml                           TO EXPLAIN: -
+#            Steps:
+#              1. Preflight: typed confirmation, active configuration, every
+#                 automation manager / agent READY (INGAMS help: refresh only
+#                 when all agents are READY), staging built from the
+#                 production PDB, P5 report clean for this staging.
+#              2. Copy staging into a new generation <GDG>(+1) with IEBCOPY
+#                 (allocated like the active generation), and verify the copy
+#                 member by member.  The generation is only created here,
+#                 after validation, so no empty or partial generation (0).
+#              3. INGAMS REFRESH CFG=<new generation>  (reloads the AM and the
+#                 ACFs on the active agents).
+#              4. Verify: ACF STATUS shows the new data set, INGLIST shows
+#                 the new APLs.
+#            Results are published as AAP job artifacts:
+#              GET /api/v2/jobs/<id>/  ->  .artifacts.sa_activation
+# Survey   :
+#   sa_target             - must be production
+#   sa_confirm_production - "ACTIVATE <production PDB DSN>"
+#   sa_proc               - SA z/OS agent PROC name (default: AUTOPROC)
+# Rollback : 90_rollback.yml rollback_action=refresh_previous
+#            sa_previous_cfg=<the generation that was active before>
+#            (printed at the end of this playbook), then
+#            rollback_action=restore_production_pdb.
+# =============================================================================
+- name: SA POLICY | P6 Activate - Refresh the running configuration
+  hosts: zos_host
+  environment: "{{ environment_vars }}"
+  gather_facts: false
+  vars_files:
+    - ../vars/sa_env.yml
+    - ../vars/new_apl.yml
+  vars:
+    sa_jobname: "{{ sa_job.prefix | default('SAP') }}NEWGEN"
+    sa_production_capable: true
+
+  tasks:
+
+    - name: "SA POLICY | Derive data set names"
+      ansible.builtin.include_role:
+        name: "{{ playbook_dir }}/../roles/sa_policy_common"
+        tasks_from: naming
+
+    - name: "SA POLICY | P6 - Must run in production mode"
+      ansible.builtin.assert:
+        that: sa_production_mode | default(false) | bool
+        fail_msg: >-
+          60_activate.yml changes the running configuration. Pass
+          -e sa_target=production -e "sa_confirm_production='ACTIVATE {{ sa_pdb_dsn }}'".
+        quiet: true
+
+    - name: "SA POLICY | Validate and render the text file"
+      ansible.builtin.include_role:
+        name: "{{ playbook_dir }}/../roles/sa_policy_common"
+        tasks_from: render
+
+    # =========================================================================
+    # 1. Preflight
+    # =========================================================================
+    - name: "SA POLICY | Read active configuration"
+      ansible.builtin.include_role:
+        name: "{{ playbook_dir }}/../roles/sa_policy_common"
+        tasks_from: active_config
+
+    - name: "SA POLICY | P6 - Keep the configuration that is active now"
+      ansible.builtin.set_fact:
+        sa_previous_cfg: "{{ sa_active_config_dsn }}"
+        sa_previous_token: "{{ sa_active_config_token }}"
+
+    - name: "SA POLICY | P6 - INGAMS status"
+      ibm.ibm_zos_core.zos_operator:
+        cmd: "F {{ sa_proc }},INGAMS"
+        verbose: false
+      register: sa_ingams
+      changed_when: false
+
+    - name: "SA POLICY | P6 - Every automation manager and agent must be READY"
+      vars:
+        _rows: >-
+          {{ sa_ingams.stdout_lines | select('search', '\s(PAM|SAM|AGENT)\s') | list }}
+      ansible.builtin.assert:
+        that:
+          - _rows | length > 0
+          - _rows | reject('search', '\sREADY\s') | list | length == 0
+        fail_msg: "Not every automation manager / agent is READY: {{ _rows }}"
+        success_msg: "{{ _rows | length }} automation manager(s) / agent(s) READY."
+
+    - name: "SA POLICY | P6 - Staging must hold a production build"
+      ansible.builtin.shell: |
+        mls "{{ sa_staging_dsn }}" 2>/dev/null | wc -l
+        dcat "{{ sa_staging_dsn }}(AOFACFMP)" 2>/dev/null | grep -e "Policy Database:" -e "Data Set Name  :"
+        dcat "{{ sa_work_pds }}(P5REPORT)" 2>/dev/null | grep -e "staging:" -e "only_expected_changes:" -e "new_apls_in_build:"
+      register: sa_p6_pre
+      changed_when: false
+
+    - name: "SA POLICY | P6 - Check staging and the P5 report"
+      vars:
+        _out: "{{ sa_p6_pre.stdout }}"
+        _members: "{{ sa_p6_pre.stdout_lines | first | default('0') | trim | int }}"
+        _pdb_name_line: "Policy Database: {{ sa_pdb_name }}"
+        _pdb_dsn_line: "Data Set Name  : '{{ sa_pdb_dsn }}'"
+        _staging_line: "staging: {{ sa_staging_dsn }}"
+      ansible.builtin.assert:
+        that:
+          - "_members | int > 0"
+          - "_pdb_name_line in _out"
+          - "_pdb_dsn_line in _out"
+          - "_staging_line in _out"
+          - "'only_expected_changes: true' in _out"
+          - "'new_apls_in_build: true' in _out"
+        fail_msg: >-
+          {{ sa_staging_dsn }} is not a validated production build. It must be built by
+          40_build_staging.yml in production mode (AOFACFMP names {{ sa_pdb_name }} /
+          '{{ sa_pdb_dsn }}'), and 50_validate.yml must have passed for it
+          (P5REPORT: new_apls_in_build and only_expected_changes true). Found:
+          {{ sa_p6_pre.stdout_lines }}
+        success_msg: "{{ sa_staging_dsn }}: production build, P5 passed."
+
+    - name: "SA POLICY | P6 - Manifest of {{ sa_staging_dsn }}"
+      ansible.builtin.include_role:
+        name: "{{ playbook_dir }}/../roles/sa_policy_common"
+        tasks_from: manifest
+      vars:
+        sa_manifest_dsn: "{{ sa_staging_dsn }}"
+
+    - name: "SA POLICY | P6 - Keep staging manifest"
+      ansible.builtin.set_fact:
+        sa_p6_staging_manifest: "{{ sa_manifest }}"
+
+    # A second run after a successful activation must not add another
+    # generation with the same content.
+    - name: "SA POLICY | P6 - Manifest of the active {{ sa_previous_cfg }}"
+      ansible.builtin.include_role:
+        name: "{{ playbook_dir }}/../roles/sa_policy_common"
+        tasks_from: manifest
+      vars:
+        sa_manifest_dsn: "{{ sa_previous_cfg }}"
+
+    - name: "SA POLICY | P6 - Stop if this build is already active"
+      ansible.builtin.assert:
+        that: sa_manifest != sa_p6_staging_manifest
+        fail_msg: >-
+          {{ sa_previous_cfg }} is active and already holds exactly the staging build
+          ({{ sa_manifest | length }} members). Nothing to activate.
+        success_msg: "Staging differs from the active {{ sa_previous_cfg }}: activation needed."
+
+    # =========================================================================
+    # 2. New generation: allocated like the active one, filled by IEBCOPY
+    # =========================================================================
+    - name: "SA POLICY | P6 - Read the active generation's volume and the GDG"
+      ansible.builtin.shell: |
+        dls -l -b -H "{{ sa_previous_cfg }}" 2>/dev/null
+        echo "---"
+        tsocmd "LISTCAT ENT('{{ sa_config_gdg_base }}') ALL" 2>/dev/null | grep -e "NONVSAM--" -e LIMIT
+      register: sa_p6_gdg
+      changed_when: false
+
+    # dls columns differ by option (plain -l has no date, -u/-s add some), so
+    # the volume is taken by its header name:
+    #   dsname  dsorg recfm lrecl blksize volume
+    #   SYSAUTO.PDB.SOCNTL.G0016V00  PO  FB  80 32720  LTECAT
+    - name: "SA POLICY | P6 - Parse volume and generations"
+      vars:
+        _hdr: "{{ sa_p6_gdg.stdout_lines | select('match', '^dsname\\s') | first | default('') }}"
+        _row: "{{ sa_p6_gdg.stdout_lines | select('match', '^' ~ (sa_previous_cfg | regex_escape) ~ '\\s') | first | default('') }}"
+      ansible.builtin.set_fact:
+        sa_p6_volume: >-
+          {{ _row.split()[_hdr.split().index('volume')] if 'volume' in _hdr.split()
+             and _row.split() | length == _hdr.split() | length else '' }}
+        sa_p6_gens_before: >-
+          {{ sa_p6_gdg.stdout_lines | select('search', 'NONVSAM--')
+             | map('regex_replace', '^.*NONVSAM--(\S+).*$', '\g<1>') | list }}
+
+    - name: "SA POLICY | P6 - Volume of {{ sa_previous_cfg }} must be known"
+      ansible.builtin.assert:
+        that: sa_p6_volume is match('^[A-Z0-9@#$]{1,6}$')
+        fail_msg: "Could not read the volume of {{ sa_previous_cfg }} from dls: {{ sa_p6_gdg.stdout_lines }}"
+        quiet: true
+
+    - name: "SA POLICY | P6 - The active configuration must be the newest generation"
+      ansible.builtin.assert:
+        that: sa_p6_gens_before | sort | last == sa_previous_cfg
+        fail_msg: >-
+          {{ sa_previous_cfg }} is active, but the newest generation of {{ sa_config_gdg_base }}
+          is {{ sa_p6_gens_before | sort | last }}. Find out why before adding another one.
+        success_msg: "Active = newest generation: {{ sa_previous_cfg }} (volume {{ sa_p6_volume }})."
+
+    - name: "SA POLICY | P6 - Render the copy job"
+      ansible.builtin.set_fact:
+        sa_newgen_jcl: |-
+          {{ lookup('ansible.builtin.template', playbook_dir ~ '/../templates/jobcard.j2') }}//*-------------------------------------------------------------------
+          //* P6 - Copy the validated staging build into a new generation
+          //* Generated by sa_policy/playbooks/60_activate.yml - do not edit
+          //*-------------------------------------------------------------------
+          //COPY     EXEC PGM=IEBCOPY
+          //SYSPRINT DD SYSOUT=*
+          //IN       DD DISP=SHR,DSN={{ sa_staging_dsn }}
+          //OUT      DD DSN={{ sa_config_gdg_base }}(+1),DISP=(NEW,CATLG,DELETE),
+          //            UNIT={{ sa_p6_gen_unit }},VOL=SER={{ sa_p6_volume }},
+          //            DSNTYPE=LIBRARY,SPACE=({{ sa_p6_gen_space }}),
+          //            DCB=({{ sa_previous_cfg }})
+          //SYSIN    DD *
+            COPY OUTDD=OUT,INDD=IN
+          /*
+
+    - name: "SA POLICY | JCL guard"
+      ansible.builtin.include_role:
+        name: "{{ playbook_dir }}/../roles/sa_policy_common"
+        tasks_from: jcl_guard
+      vars:
+        sa_jcl_text: "{{ sa_newgen_jcl }}"
+
+    - name: "SA POLICY | P6 - Show the copy job"
+      ansible.builtin.debug:
+        msg: "{{ sa_newgen_jcl.splitlines() }}"
+
+    - name: "SA POLICY | P6 - Store the job in {{ sa_work_pds }}(NEWGEN)"
+      ibm.ibm_zos_core.zos_copy:
+        content: "{{ sa_newgen_jcl }}"
+        dest: "{{ sa_work_pds }}(NEWGEN)"
+        replace: true
+
+    - name: "SA POLICY | P6 - Copy staging into {{ sa_config_gdg_base }}(+1)"
+      ansible.builtin.include_role:
+        name: "{{ playbook_dir }}/../roles/sa_policy_common"
+        tasks_from: run_job
+      vars:
+        sa_job_dsn: "{{ sa_work_pds }}(NEWGEN)"
+        sa_job_label: "P6 new generation"
+        sa_job_max_rc: 0
+        sa_job_dds: [SYSPRINT]
+
+    - name: "SA POLICY | P6 - Find the new generation"
+      ansible.builtin.shell: |
+        tsocmd "LISTCAT ENT('{{ sa_config_gdg_base }}') ALL" 2>/dev/null | grep "NONVSAM--"
+      register: sa_p6_gdg_after
+      changed_when: false
+
+    - name: "SA POLICY | P6 - Record the new generation"
+      ansible.builtin.set_fact:
+        sa_new_cfg: >-
+          {{ sa_p6_gdg_after.stdout_lines
+             | map('regex_replace', '^.*NONVSAM--(\S+).*$', '\g<1>') | sort | last }}
+
+    - name: "SA POLICY | P6 - The new generation must be new"
+      ansible.builtin.assert:
+        that:
+          - sa_new_cfg not in sa_p6_gens_before
+          - sa_new_cfg != sa_previous_cfg
+        fail_msg: "No new generation of {{ sa_config_gdg_base }} found after job {{ sa_job_id }}."
+        success_msg: "New generation: {{ sa_new_cfg }}"
+
+    - name: "SA POLICY | P6 - Verify {{ sa_new_cfg }} matches staging"
+      ansible.builtin.include_role:
+        name: "{{ playbook_dir }}/../roles/sa_policy_common"
+        tasks_from: manifest
+      vars:
+        sa_manifest_dsn: "{{ sa_new_cfg }}"
+        sa_manifest_expect: "{{ sa_p6_staging_manifest }}"
+
+    # =========================================================================
+    # 3. Refresh the running configuration
+    # =========================================================================
+    - name: "SA POLICY | P6 - INGAMS REFRESH CFG={{ sa_new_cfg }}"
+      ibm.ibm_zos_core.zos_operator:
+        cmd: "F {{ sa_proc }},INGAMS REFRESH CFG={{ sa_new_cfg }}"
+        wait_time: "{{ sa_p6_refresh_wait }}"
+        verbose: false
+      register: sa_refresh
+
+    - name: "SA POLICY | P6 - Refresh response"
+      ansible.builtin.debug:
+        msg: "{{ sa_refresh.stdout_lines }}"
+
+    # =========================================================================
+    # 4. Verify
+    # =========================================================================
+    - name: "SA POLICY | P6 - Wait for ACF STATUS to show {{ sa_new_cfg }}"
+      ibm.ibm_zos_core.zos_operator:
+        cmd: "F {{ sa_proc }},ACF STATUS"
+        verbose: false
+      register: sa_acf_after
+      changed_when: false
+      # Compare the parsed name (as active_config.yml does).  A regex ending in
+      # '\b' never matched: Jinja turns '\b' in a string literal into a
+      # backspace (seen on the first activation, G0017V00).
+      until: >-
+        (sa_acf_after.stdout_lines | select('search', 'CONFIGURATION DATASET') | first | default('')
+         | regex_replace('^.*CONFIGURATION DATASET\s*=\s*(\S+).*$', '\g<1>')) == sa_new_cfg
+      retries: 12
+      delay: 10
+      ignore_errors: true
+
+    - name: "SA POLICY | P6 - INGLIST {{ sa_new_policy.apg.name }} and the new APLs"
+      ibm.ibm_zos_core.zos_operator:
+        cmd: "F {{ sa_proc }},INGLIST {{ item }}"
+        verbose: false
+      register: sa_inglist_after
+      changed_when: false
+      loop: "{{ [sa_new_policy.apg.name] + (sa_new_policy.apls | map(attribute='name') | list) }}"
+
+    - name: "SA POLICY | P6 - Result"
+      ansible.builtin.debug:
+        msg: >-
+          {{ ['Previous configuration: ' ~ sa_previous_cfg ~ ' (token ' ~ sa_previous_token ~ ')',
+              'New configuration     : ' ~ sa_new_cfg,
+              '--- ACF STATUS']
+             + (sa_acf_after.stdout_lines | default([]) | select('search', 'AOF00[56]I') | list)
+             + ['--- INGLIST']
+             + (sa_inglist_after.results | map(attribute='stdout_lines') | flatten
+                | reject('search', 'ISF031I|^\S+\s+\d{7}\s+\S+\s+-F ') | list) }}
+
+    - name: "SA POLICY | P6 - Publish activation record as AAP job artifact"
+      ansible.builtin.set_stats:
+        data:
+          sa_activation:
+            previous_cfg: "{{ sa_previous_cfg }}"
+            previous_token: "{{ sa_previous_token }}"
+            new_cfg: "{{ sa_new_cfg }}"
+            copy_job: "{{ sa_job_id }}"
+            refresh_response: "{{ sa_refresh.stdout_lines }}"
+            acf_status: "{{ sa_acf_after.stdout_lines | default([]) | select('search', 'AOF00[56]I') | list }}"
+
+    - name: "SA POLICY | P6 - The new configuration must be active"
+      ansible.builtin.assert:
+        that: sa_acf_after is succeeded
+        fail_msg: >-
+          ACF STATUS does not show {{ sa_new_cfg }} after the refresh. Read the refresh
+          response above. To go back: 90_rollback.yml rollback_action=refresh_previous
+          -e sa_previous_cfg={{ sa_previous_cfg }} (with the same production confirmation).
+        success_msg: >-
+          {{ sa_new_cfg }} is active. Check the INGLIST above for the DBA1 resources.
+          To go back: 90_rollback.yml rollback_action=refresh_previous
+          -e sa_previous_cfg={{ sa_previous_cfg }}

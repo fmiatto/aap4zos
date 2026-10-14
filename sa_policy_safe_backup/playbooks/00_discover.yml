@@ -1,0 +1,435 @@
+---
+# =============================================================================
+# Playbook : 00_discover.yml                                     Phase P0
+# Purpose  : Read-only discovery before adding the DB2 DBA1 APLs to the SA z/OS
+#            policy database.  Nothing on z/OS is written.
+#              1. SA baselines: DISPSYS, ACF STATUS, INGAMS, INGLIST APL/APG,
+#                 DISPSTAT, INGVOTE, D GRS on the PDB.
+#              2. DB2 evidence: D A,DBA1*, -DBA1 DISPLAY GROUP, DBA1* PROCLIB
+#                 members.
+#              3. Guard: stop if any new entry is already defined to SA.
+#              4. PDB / active configuration attributes and member lists.
+#              5. Spike: read every SINGSAMP(INGEB*) sample and every
+#                 SINGISKL skeleton that contains ISPSTART, and index their
+#                 programs, DDs, SYSTSIN and ISPSTART lines.
+#              6. Print the next actions, and write the full output plus a
+#                 batch_draft.yml (sa_textupd / sa_build) to
+#                 sa_policy/output/discover_<stamp>/ on the control node.
+#            Results are published as AAP job artifacts:
+#              GET /api/v2/jobs/<id>/  ->  .artifacts.sa_discovery
+# Survey   :
+#   sa_proc                   - SA z/OS agent PROC name (default: AUTOPROC)
+#   sa_system                 - System name (default: LTE1)
+#   sa_discover_raw_artifacts - true to add the raw output to the artifact
+#                               (default: false; use it in AAP)
+# =============================================================================
+- name: SA POLICY | P0 Discover - Read-only discovery for the DB2 DBA1 APLs
+  hosts: zos_host
+  environment: "{{ environment_vars }}"
+  gather_facts: false
+  vars_files:
+    - ../vars/sa_env.yml
+    - ../vars/new_apl.yml
+
+  tasks:
+
+    - name: "SA POLICY | Derive data set names"
+      ansible.builtin.include_role:
+        name: "{{ playbook_dir }}/../roles/sa_policy_common"
+        tasks_from: naming
+
+    - name: "SA POLICY | Read active configuration"
+      ansible.builtin.include_role:
+        name: "{{ playbook_dir }}/../roles/sa_policy_common"
+        tasks_from: active_config
+
+    # =========================================================================
+    # 1 + 2. Operator baselines (all display-only commands)
+    # =========================================================================
+    - name: "SA POLICY | P0 - Issue baseline display commands"
+      ibm.ibm_zos_core.zos_operator:
+        cmd: "{{ item }}"
+        verbose: false
+      register: sa_baseline_raw
+      changed_when: false
+      loop:
+        - "F {{ sa_proc }},DISPSYS"
+        - "F {{ sa_proc }},INGAMS"
+        - "F {{ sa_proc }},INGLIST */APL/{{ sa_system }} OUTMODE=LINE"
+        - "F {{ sa_proc }},INGLIST */APG/{{ sa_system }} OUTMODE=LINE"
+        - "F {{ sa_proc }},DISPSTAT"
+        - "F {{ sa_proc }},INGVOTE OUTMODE=LINE"
+        - "D GRS,RES=(*,{{ sa_pdb_dsn }})"
+        - "D A,DBA1*"
+        - "{{ sa_new_policy.apls[0].command_prefix | default('-DBA1') }} DISPLAY GROUP"
+
+    - name: "SA POLICY | P0 - Index baseline output by command"
+      ansible.builtin.set_fact:
+        sa_baseline: >-
+          {%- set out = {} -%}
+          {%- for r in sa_baseline_raw.results -%}
+          {%-   set _ = out.update({r.item: r.stdout_lines | default([])}) -%}
+          {%- endfor -%}
+          {{ out }}
+
+    - name: "SA POLICY | P0 - Check which DB2 address spaces are running"
+      ansible.builtin.set_fact:
+        sa_db2_running: >-
+          {{ sa_new_policy.apls | map(attribute='job_name')
+             | select('in', (sa_baseline['D A,DBA1*'] | join(' ')).split()) | list }}
+
+    - name: "SA POLICY | P0 - Warn about job names not seen in D A,DBA1*"
+      ansible.builtin.debug:
+        msg: >-
+          WARNING: not active on {{ sa_system }}:
+          {{ sa_new_policy.apls | map(attribute='job_name') | difference(sa_db2_running) }}
+      when: sa_new_policy.apls | map(attribute='job_name') | difference(sa_db2_running) | length > 0
+
+    # =========================================================================
+    # 3. Guard: none of the new entries may already be known to SA.
+    # =========================================================================
+    - name: "SA POLICY | P0 - INGLIST the planned resources"
+      ibm.ibm_zos_core.zos_operator:
+        cmd: "F {{ sa_proc }},INGLIST {{ item }} OUTMODE=LINE"
+        verbose: false
+      register: sa_guard_raw
+      changed_when: false
+      loop: >-
+        {{ [sa_new_policy.apg.name ~ '/APG/' ~ sa_system]
+           + (sa_new_policy.apls | map(attribute='name') | map('regex_replace', '$', '/APL/' ~ sa_system) | list) }}
+
+    - name: "SA POLICY | P0 - Find planned entries that already exist"
+      ansible.builtin.set_fact:
+        sa_already_defined: >-
+          {%- set names = [sa_new_policy.apg.name] + (sa_new_policy.apls | map(attribute='name') | list) -%}
+          {%- set found = [] -%}
+          {%- for r in sa_guard_raw.results -%}
+          {%-   for line in r.stdout_lines | default([]) -%}
+          {%-     set words = line.split() -%}
+          {%-     if words | length > 0 and words[0] in names and words[0] not in found -%}
+          {%-       set _ = found.append(words[0]) -%}
+          {%-     endif -%}
+          {%-   endfor -%}
+          {%- endfor -%}
+          {{ found }}
+
+    - name: "SA POLICY | P0 - Stop if the new entries already exist in SA"
+      ansible.builtin.assert:
+        that: sa_already_defined | length == 0
+        fail_msg: >-
+          Already defined to SA on {{ sa_system }}: {{ sa_already_defined }}.
+          Edit vars/new_apl.yml or remove the existing definitions first.
+        success_msg: "None of the planned entries are defined to SA yet."
+
+    # =========================================================================
+    # 4. Data sets: PDB, active configuration, catalog, PROCLIB members
+    # =========================================================================
+    - name: "SA POLICY | P0 - Check whether the clone exists"
+      ansible.builtin.include_role:
+        name: "{{ playbook_dir }}/../roles/sa_policy_common"
+        tasks_from: dataset_exists
+      vars:
+        sa_dsn: "{{ sa_clone_dsn }}"
+
+    - name: "SA POLICY | P0 - Record clone state"
+      ansible.builtin.set_fact:
+        sa_clone_exists: "{{ sa_dsn_exists | bool }}"
+
+    - name: "SA POLICY | P0 - LISTDS / LISTCAT the PDB and configuration"
+      ibm.ibm_zos_core.zos_tso_command:
+        commands:
+          - "LISTDS '{{ sa_pdb_dsn }}' MEMBERS"
+          - "LISTCAT ENTRIES('{{ sa_pdb_dsn }}') ALL"
+          - "LISTDS '{{ sa_active_config_dsn }}' MEMBERS"
+          - "LISTCAT ENTRIES('{{ sa_active_config_dsn }}') ALL"
+          - "LISTCAT LEVEL('{{ sa_pdb_dsn }}')"
+          - "LISTCAT LEVEL('{{ sa_work_hlq }}')"
+      register: sa_listds
+      failed_when: false
+      changed_when: false
+
+    - name: "SA POLICY | P0 - Find DB2 procedures in the PROCLIB concatenation"
+      ansible.builtin.shell: |
+        for lib in {{ sa_proclibs | join(' ') }}; do
+          for m in $(mls "$lib" 2>/dev/null | grep -E '^({{ sa_new_policy.apls | map(attribute='job_name') | join('|') }})$'); do
+            echo "=== $lib($m)"
+            dcat "$lib($m)"
+          done
+        done
+      register: sa_procs
+      changed_when: false
+
+    - name: "SA POLICY | P0 - DB2 procedures found"
+      ansible.builtin.debug:
+        msg: "{{ sa_procs.stdout_lines | select('match', '^=== ') | map('regex_replace', '^=== ', '') | list }}"
+
+    # =========================================================================
+    # 5. Spike: how can the text-file update and the build run unattended?
+    # =========================================================================
+    - name: "SA POLICY | P0 - Print INGEB* samples and ISPSTART skeletons"
+      ansible.builtin.shell: |
+        for lib in {{ sa_spike_libraries | join(' ') }}; do
+          if ! mls "$lib" >/dev/null 2>&1; then
+            echo "=== $lib : not found"
+            continue
+          fi
+          for m in $(mls "$lib"); do
+            case "$lib" in
+              *.SINGSAMP) case "$m" in INGEB*) ;; *) continue ;; esac ;;
+              *) dcat "$lib($m)" | grep -q ISPSTART || continue ;;
+            esac
+            echo "=== $lib($m)"
+            dcat "$lib($m)"
+          done
+        done
+      register: sa_spike
+      changed_when: false
+
+
+    # Index every printed member: title, programs, DDs, SYSTSIN in-stream
+    # lines and ISPSTART calls.  Columns 73-80 (sequence numbers) are dropped.
+    # Only list appends survive inside the loop, so scalars are collected as
+    # lists and flattened in the second pass.
+    - name: "SA POLICY | P0 - Index spike members"
+      ansible.builtin.set_fact:
+        sa_spike_index: >-
+          {%- set ns = namespace(cur=none, systsin=false) -%}
+          {%- set raw_index = [] -%}
+          {%- set noise = '(?i)licensed|property of|copyright|corp[.]|restricted|^[0-9]{4}-|[(]c[)]|status *=' -%}
+          {%- for raw in sa_spike.stdout_lines -%}
+          {%-   set line = raw[:72].rstrip() -%}
+          {%-   if line.startswith('=== ') -%}
+          {%-     set ns.cur = {'member': line[4:].split(' : ')[0], 'found': ' : not found' not in line,
+                                'descs': [], 'titles': [], 'body': [],
+                                'pgms': [], 'dds': [], 'systsin': [], 'ispstart': []} -%}
+          {%-     set _ = raw_index.append(ns.cur) -%}
+          {%-     set ns.systsin = false -%}
+          {%-   elif ns.cur is not none -%}
+          {%-     set _ = ns.cur.body.append(1) -%}
+          {%-     if line is match('^(//[*]|/[*]|[*]|[)]CM)') -%}
+          {%-       set text = line | regex_replace('^(//[*]|/[*]|[*]|[)]CM)', '') | regex_replace('[*]/\s*$', '') | regex_replace('^[\s*-]+|[\s*-]+$', '') -%}
+          {%-       if text is search('(?i)descriptive name\s*[=:]') -%}
+          {%-         set _ = ns.cur.descs.append(text | regex_replace('(?i)^.*descriptive name\s*[=:]\s*', '')) -%}
+          {%-       elif text | length > 5 and text is not search(noise) -%}
+          {%-         set _ = ns.cur.titles.append(text) -%}
+          {%-       endif -%}
+          {%-     endif -%}
+          {%-     for p in line | regex_findall('EXEC\s+PGM=([A-Z0-9@#$&]+)') if p not in ns.cur.pgms -%}
+          {%-       set _ = ns.cur.pgms.append(p) -%}
+          {%-     endfor -%}
+          {%-     for d in line | regex_findall('^//([A-Z0-9@#$&.]+)\s+DD(?:\s|$)') if d not in ns.cur.dds -%}
+          {%-       set _ = ns.cur.dds.append(d) -%}
+          {%-     endfor -%}
+          {%-     if line is match('^//SYSTSIN\s+DD\s+([*]|DATA)') -%}
+          {%-       set ns.systsin = true -%}
+          {%-     elif ns.systsin and (line.startswith('/*') or line.startswith('//')) -%}
+          {%-       set ns.systsin = false -%}
+          {%-     elif ns.systsin -%}
+          {%-       set _ = ns.cur.systsin.append(line) -%}
+          {%-     endif -%}
+          {%-     if 'ISPSTART' in line and line.strip() not in ns.cur.ispstart -%}
+          {%-       set _ = ns.cur.ispstart.append(line.strip()) -%}
+          {%-     endif -%}
+          {%-   endif -%}
+          {%- endfor -%}
+          {%- set out = [] -%}
+          {%- for m in raw_index -%}
+          {%-   set _ = out.append({'member': m.member, 'found': m.found,
+                  'title': (m.descs + m.titles + [''])[0][:80], 'lines': m.body | length,
+                  'pgms': m.pgms, 'dds': m.dds, 'systsin': m.systsin, 'ispstart': m.ispstart}) -%}
+          {%- endfor -%}
+          {{ out }}
+
+    - name: "SA POLICY | P0 - Classify spike members"
+      ansible.builtin.set_fact:
+        sa_spike_missing: "{{ sa_spike_index | rejectattr('found') | map(attribute='member') | list }}"
+        sa_spike_build: "{{ sa_spike_index | selectattr('member', 'search', 'INGEBBLD') | list }}"
+        # Anything that runs ISPF in batch or carries TSO input, minus the build sample.
+        sa_spike_textupd: >-
+          {{ sa_spike_index | selectattr('found')
+             | rejectattr('member', 'search', 'INGEBBLD')
+             | selectattr('ispstart', 'truthy') | list
+             + (sa_spike_index | selectattr('found')
+                | rejectattr('member', 'search', 'INGEBBLD')
+                | rejectattr('ispstart', 'truthy')
+                | selectattr('systsin', 'truthy') | list) }}
+
+    - name: "SA POLICY | P0 - Spike members (full text in the report directory)"
+      ansible.builtin.debug:
+        msg: >-
+          {%- set rows = [] -%}
+          {%- for m in sa_spike_index | selectattr('found') -%}
+          {%-   set _ = rows.append('%-28s %-9s SYSTSIN %2d  ISPSTART %d  %s' | format(
+                  m.member | regex_replace('^.*\.', ''), m.pgms | first | default('-'),
+                  m.systsin | length, m.ispstart | length, m.title[:60])) -%}
+          {%- endfor -%}
+          {{ rows + (['Not found: ' ~ (sa_spike_missing | join(', '))] if sa_spike_missing else []) }}
+
+    # =========================================================================
+    # What to do next
+    # =========================================================================
+    - name: "SA POLICY | P0 - Work out the next actions"
+      ansible.builtin.set_fact:
+        sa_report_dir: "{{ (playbook_dir ~ '/../output/discover_' ~ sa_stamp) | realpath }}"
+        sa_db2_missing: "{{ sa_new_policy.apls | map(attribute='job_name') | difference(sa_db2_running) }}"
+
+    # Shorter path for messages: relative to where ansible-playbook was started.
+    - name: "SA POLICY | P0 - Report path for messages"
+      ansible.builtin.set_fact:
+        sa_report_dir_shown: "{{ sa_report_dir | relpath(lookup('env', 'PWD') or '/') }}"
+
+    - name: "SA POLICY | P0 - Build the action list"
+      ansible.builtin.set_fact:
+        sa_actions: >-
+          {%- set a = [] -%}
+          {%- if sa_db2_missing -%}
+          {%-   set _ = a.append('Not running on ' ~ sa_system ~ ': ' ~ (sa_db2_missing | join(', '))
+                  ~ '. Confirm job_name in vars/new_apl.yml, or accept that SA will see them DOWN.') -%}
+          {%- endif -%}
+          {%- if not sa_clone_exists | bool -%}
+          {%-   set _ = a.append('No clone yet (' ~ sa_clone_dsn ~ '). Run 10_backup_clone.yml.') -%}
+          {%- endif -%}
+          {%- if not sa_textupd.verified | bool -%}
+          {%-   if sa_spike_textupd -%}
+          {%-     set _ = a.append('P3: open ' ~ sa_report_dir_shown ~ '/batch_draft.yml. Candidates for the text-file update: '
+                    ~ (sa_spike_textupd | map(attribute='member') | map('regex_replace', '^.*\.', '') | join(', '))
+                    ~ ' (SYSTSIN / ISPSTART lines are copied in as comments). Fill sa_textupd.systsin and dd, point them at '
+                    ~ sa_clone_dsn ~ ' / ' ~ sa_clone_pdb_name ~ ', set verified: true.') -%}
+          {%-   else -%}
+          {%-     set _ = a.append('P3: no INGEB* sample or ISPSTART skeleton looks like a text-file update. '
+                    ~ 'Check ' ~ (sa_spike_libraries | join(', ')) ~ ' by hand or ask IBM how to run Data Management text-file updates in batch.') -%}
+          {%-   endif -%}
+          {%- endif -%}
+          {%- if not sa_build.verified | bool -%}
+          {%-   if sa_spike_build -%}
+          {%-     set _ = a.append('P4: in the same file, fill sa_build.systsin from ' ~ sa_spike_build[0].member
+                    ~ ' (its SYSTSIN is copied in). Use SOURCE ' ~ sa_clone_pdb_name ~ ' and output ' ~ sa_staging_dsn
+                    ~ ', set verified: true.') -%}
+          {%-   else -%}
+          {%-     set _ = a.append('P4: INGEBBLD not found in ' ~ sa_singsamp ~ '. Use the site build job instead (ISPF 3.14 search for INGEBBLD).') -%}
+          {%-   endif -%}
+          {%- endif -%}
+          {%- if not (sa_textupd.verified | bool and sa_build.verified | bool) -%}
+          {%-   set _ = a.append('Then run: ansible-playbook -i <inventory> sa_policy/playbooks/30_apply_to_pdb.yml -e @' ~ sa_report_dir_shown ~ '/batch_draft.yml') -%}
+          {%- else -%}
+          {%-   set _ = a.append('Batch mechanism confirmed. Next: ' ~ ('30_apply_to_pdb.yml' if sa_clone_exists | bool else '10_backup_clone.yml') ~ '.') -%}
+          {%- endif -%}
+          {{ a }}
+
+    - name: "SA POLICY | P0 - Hand the results to the report play"
+      ansible.builtin.set_fact:
+        sa_discovery_report:
+          dir: "{{ sa_report_dir }}"
+          dir_shown: "{{ sa_report_dir_shown }}"
+          stamp: "{{ sa_stamp }}"
+          system: "{{ sa_system }}"
+          active_config: "{{ sa_active_config_dsn }} (token {{ sa_active_config_token }})"
+          clone: "{{ sa_clone_dsn }} ({{ 'exists' if sa_clone_exists | bool else 'missing' }})"
+          db2_running: "{{ sa_db2_running }}"
+          db2_missing: "{{ sa_db2_missing }}"
+          actions: "{{ sa_actions }}"
+          baselines: "{{ sa_baseline }}"
+          datasets: >-
+            {%- set out = {} -%}
+            {%- for o in sa_listds.output | default([]) -%}
+            {%-   set _ = out.update({o.command: o.content | default([])}) -%}
+            {%- endfor -%}
+            {{ out }}
+          procs: "{{ sa_procs.stdout_lines }}"
+          spike_index: "{{ sa_spike_index }}"
+          spike_build: "{{ sa_spike_build }}"
+          spike_textupd: "{{ sa_spike_textupd }}"
+          spike_lines: "{{ sa_spike.stdout_lines }}"
+          clone_pdb_name: "{{ sa_clone_pdb_name }}"
+          clone_dsn: "{{ sa_clone_dsn }}"
+          staging_dsn: "{{ sa_staging_dsn }}"
+      delegate_to: localhost
+      delegate_facts: true
+
+    # =========================================================================
+    # Publish a compact discovery record:
+    #   GET /api/v2/jobs/<id>/  ->  .artifacts.sa_discovery
+    # Full text (baselines, LISTCAT, procs, spike members) is only added when
+    # sa_discover_raw_artifacts=true, since local report files do not survive
+    # an AAP execution environment.
+    # =========================================================================
+    - name: "SA POLICY | P0 - Publish discovery record as AAP job artifact"
+      ansible.builtin.set_stats:
+        data:
+          sa_discovery: >-
+            {{ {'active_config_dsn': sa_active_config_dsn,
+                'active_config_token': sa_active_config_token,
+                'clone_exists': sa_clone_exists | bool,
+                'db2_running': sa_db2_running,
+                'already_defined': sa_already_defined,
+                'spike_members': sa_spike_index | selectattr('found') | map(attribute='member') | list,
+                'p3_mechanism_verified': sa_textupd.verified | bool,
+                'p4_build_verified': sa_build.verified | bool,
+                'actions': sa_actions}
+               | combine({'raw': sa_discovery_report_raw} if sa_discover_raw_artifacts | default(false) | bool else {}) }}
+      vars:
+        sa_discovery_report_raw:
+          baselines: "{{ sa_baseline }}"
+          procs: "{{ sa_procs.stdout_lines }}"
+          spike_output: "{{ sa_spike.stdout_lines | join('\n') }}"
+
+# =============================================================================
+# Write the full discovery output to sa_policy/output/discover_<stamp>/ on the
+# control node, plus a batch_draft.yml to fill in for P3 / P4.
+# =============================================================================
+- name: SA POLICY | P0 Discover - Write the report on the control node
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    r: "{{ sa_discovery_report }}"
+
+  tasks:
+
+    - name: "SA POLICY | P0 - Create {{ r.dir }}"
+      ansible.builtin.file:
+        path: "{{ r.dir }}"
+        state: directory
+        mode: "0750"
+
+    - name: "SA POLICY | P0 - Write report files"
+      ansible.builtin.copy:
+        dest: "{{ r.dir }}/{{ item.name }}"
+        content: "{{ item.content }}"
+        mode: "0640"
+      loop:
+        - name: baselines.txt
+          content: |
+            {% for cmd, lines in r.baselines.items() %}
+            ===== {{ cmd }}
+            {{ lines | join('\n') }}
+
+            {% endfor %}
+        - name: datasets.txt
+          content: |
+            {% for cmd, lines in r.datasets.items() %}
+            ===== {{ cmd }}
+            {{ lines | join('\n') }}
+
+            {% endfor %}
+        - name: procs.txt
+          content: "{{ r.procs | join('\n') }}\n"
+        - name: spike_full.txt
+          content: "{{ r.spike_lines | join('\n') }}\n"
+      loop_control:
+        label: "{{ item.name }}"
+
+    - name: "SA POLICY | P0 - Write report.txt and batch_draft.yml"
+      ansible.builtin.template:
+        src: "{{ playbook_dir }}/../templates/{{ item }}.j2"
+        dest: "{{ r.dir }}/{{ item }}"
+        mode: "0640"
+      loop:
+        - report.txt
+        - batch_draft.yml
+
+    - name: "SA POLICY | P0 - Next actions"
+      ansible.builtin.debug:
+        msg: >-
+          {{ ['Report: ' ~ r.dir_shown ~ '/report.txt (full output: baselines.txt, datasets.txt, procs.txt, spike_full.txt)']
+             + (r.actions | map('regex_replace', '^', '- ') | list) }}

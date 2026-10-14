@@ -36,8 +36,8 @@
         msg: "{{ cmd_output.stdout_lines }}"
 
     # =========================================================================
-    # Publish the command and its raw output as AAP artifacts visible in the
-    # job's API response:
+    # Publish the command and its output as a single newline-joined string so
+    # the AAP API artifact is human-readable in one field:
     #   GET /api/v2/jobs/<id>/  →  .artifacts.zos_command
     #   GET /api/v2/jobs/<id>/  →  .artifacts.zos_command_output
     # =========================================================================
@@ -45,4 +45,4 @@
       ansible.builtin.set_stats:
         data:
           zos_command: "{{ zos_command }}"
-          zos_command_output: "{{ cmd_output.stdout_lines }}"
+          zos_command_output: "{{ cmd_output.stdout_lines | join('\n') }}"

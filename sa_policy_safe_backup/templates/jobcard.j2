@@ -1,0 +1,18 @@
+{#
+  Job card shared by every job the prototype submits (textupd.jcl.j2,
+  ingebbld.jcl.j2).  Built from sa_job (vars/sa_env.yml) and sa_jobname:
+
+    //SAPTXUPD JOB MSGCLASS=X,CLASS=A,NOTIFY=&SYSUID,
+    //         REGION=0M,TIME=NOLIMIT
+
+  account / programmer are added as positional fields only when set.
+  An empty notify drops the NOTIFY keyword.
+  The explicit newline at the end survives Jinja's trailing-newline strip
+  on include, so the next line of the including template starts on its own.
+#}
+{% set acct = sa_job.account | default('', true) | string %}
+{% set pgmr = sa_job.programmer | default('', true) | string %}
+{% set positional = (('(' ~ acct ~ ')') if acct else '') ~ ((",'" ~ pgmr ~ "'") if pgmr else '') %}
+{% set notify = sa_job.notify | default('', true) | string %}
+//{{ '%-8s' | format(sa_jobname[:8]) }} JOB {{ (positional ~ ',') if positional else '' }}MSGCLASS={{ sa_job.msgclass }},CLASS={{ sa_job.class }}{{ (',NOTIFY=' ~ notify) if notify else '' }},
+//         REGION={{ sa_job.region | default('0M', true) }},TIME={{ sa_job.time | default('NOLIMIT', true) }}{{ '\n' }}

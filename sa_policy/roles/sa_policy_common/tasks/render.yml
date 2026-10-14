@@ -1,0 +1,43 @@
+---
+# =============================================================================
+# render.yml - Render every policy in sa_policies (vars/policies/<name>.yml)
+#   with templates/apl.txt.j2 and join them, in list order, into one text
+#   file.
+#   Sets: sa_textfile        the combined text file
+#         sa_inglist_names   APGs created and all APLs, for the final INGLIST
+#   sa_policies: a list, or a comma-separated string from -e.
+# =============================================================================
+- name: "SA | Policies to add"
+  ansible.builtin.set_fact:
+    sa_policy_list: >-
+      {{ (sa_policies.split(',') if sa_policies is string else sa_policies)
+         | map('trim') | select | list }}
+    sa_textfile_parts: []
+    sa_inglist_names: []
+
+- name: "SA | At least one policy"
+  ansible.builtin.assert:
+    that: sa_policy_list | length > 0
+    fail_msg: "sa_policies is empty."
+    quiet: true
+
+- name: "SA | Render each policy"
+  ansible.builtin.include_tasks: render_one.yml
+  loop: "{{ sa_policy_list }}"
+  loop_control:
+    loop_var: sa_policy_name
+
+- name: "SA | Combine into one text file"
+  ansible.builtin.set_fact:
+    sa_textfile: "{{ sa_textfile_parts | join('\n\n') }}"
+
+# The work data sets are FB 80.
+- name: "SA | Check the text file layout"
+  ansible.builtin.assert:
+    that: sa_textfile.splitlines() | map('length') | max <= 80
+    fail_msg: "Text file lines over 80 columns: {{ sa_textfile.splitlines() | select('match', '^.{81,}') | list }}"
+    quiet: true
+
+- name: "SA | Policies: {{ sa_policy_list | join(', ') }}"
+  ansible.builtin.debug:
+    msg: "{{ sa_textfile.splitlines() | select('match', '^(NEW|UPD) ') | list }}"

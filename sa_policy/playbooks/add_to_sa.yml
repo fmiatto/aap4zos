@@ -1,0 +1,244 @@
+---
+# =============================================================================
+# Playbook : add_to_sa.yml
+# Purpose  : Add the policies listed in sa_policies (vars/policies/*.yml) to
+#            SA z/OS and make them active, straight away:
+#              apply    - render all policies into one text file and apply it
+#                         to the PDB (SINGSAMP(INGEBFLT), AOFFBFL1)
+#              build    - full build of the PDB (SINGSAMP(INGEBBLD), AOFFBBL1)
+#              activate - copy the build into a new generation of the
+#                         configuration GDG and INGAMS REFRESH to it
+#            Run one stage alone with --tags apply|build|activate.
+#            Choose policies with -e sa_policies=db2-dba1,cics62,rmf.
+#            System values: vars/sa_env.yml.
+# =============================================================================
+- name: SA | Add policies to System Automation, build and activate
+  hosts: zos_host
+  environment: "{{ environment_vars }}"
+  gather_facts: false
+  vars_files:
+    - ../vars/sa_env.yml
+
+  tasks:
+
+    # Runs for every stage: activate lists the new entries at the end.
+    - name: "SA | Render the policies"
+      ansible.builtin.include_role:
+        name: "{{ playbook_dir }}/../roles/sa_policy_common"
+        tasks_from: render
+        apply:
+          tags: [always]
+      tags: [always]
+
+    # =========================================================================
+    # apply
+    # =========================================================================
+    - name: "SA | Apply"
+      tags: [apply]
+      vars:
+        sa_jobname: "{{ sa_job.prefix }}TXUPD"
+      block:
+
+        - name: "SA | Work PDS {{ sa_work_pds }}"
+          ibm.ibm_zos_core.zos_data_set:
+            name: "{{ sa_work_pds }}"
+            type: pds
+            record_format: fb
+            record_length: 80
+            space_primary: 5
+            space_secondary: 5
+            space_type: cyl
+            directory_blocks: 20
+            state: present
+
+        # PDBUPD: sequential (AOFFBFL1 drops a member name).
+        # PDBRPT: PDS (LMINIT ENQ(SHRW) needs a partitioned data set).
+        - name: "SA | Recreate {{ sa_source_dsn }} and {{ sa_report_dsn }}"
+          ibm.ibm_zos_core.zos_data_set:
+            name: "{{ item.name }}"
+            type: "{{ item.type }}"
+            record_format: fb
+            record_length: "{{ item.lrecl }}"
+            space_primary: 1
+            space_secondary: 5
+            space_type: cyl
+            directory_blocks: "{{ 10 if item.type == 'pds' else omit }}"
+            replace: true
+            state: present
+          loop:
+            - { name: "{{ sa_source_dsn }}", type: seq, lrecl: 80 }
+            - { name: "{{ sa_report_dsn }}", type: pds, lrecl: 133 }
+          loop_control:
+            label: "{{ item.name }}"
+
+        - name: "SA | Render templates/textupd.jcl.j2"
+          ansible.builtin.set_fact:
+            sa_textupd_jcl: "{{ lookup('ansible.builtin.template', playbook_dir ~ '/../templates/textupd.jcl.j2') | trim }}"
+
+        - name: "SA | Store the text file and the job"
+          ibm.ibm_zos_core.zos_copy:
+            content: "{{ item.content }}"
+            dest: "{{ item.dest }}"
+            replace: true
+          loop:
+            - { dest: "{{ sa_source_dsn }}", content: "{{ sa_textfile }}" }
+            - { dest: "{{ sa_work_pds }}(POLICY)", content: "{{ sa_textfile }}" }
+            - { dest: "{{ sa_work_pds }}(TEXTUPD)", content: "{{ sa_textupd_jcl }}" }
+          loop_control:
+            label: "{{ item.dest }}"
+
+        - name: "SA | Text-file update"
+          block:
+            - name: "SA | Run the text-file update"
+              ansible.builtin.include_role:
+                name: "{{ playbook_dir }}/../roles/sa_policy_common"
+                tasks_from: run_job
+              vars:
+                sa_job_dsn: "{{ sa_work_pds }}(TEXTUPD)"
+                sa_job_label: "Text update"
+                sa_job_max_rc: "{{ sa_textupd.max_rc }}"
+          always:
+            - name: "SA | Read the update report"
+              ansible.builtin.shell: |
+                dsn="{{ sa_report_dsn }}"
+                tsocmd "LISTDS '$dsn' MEMBERS" 2>/dev/null | sed '1,/--MEMBERS--/d' |
+                while read mem rest; do
+                  cat "//'$dsn($mem)'"
+                done
+              register: sa_textupd_report
+              changed_when: false
+              failed_when: false
+
+            - name: "SA | Update report"
+              ansible.builtin.debug:
+                msg: "{{ (sa_textupd_report.stdout_lines | default([])) or ['(report is empty)'] }}"
+
+    # =========================================================================
+    # build
+    # =========================================================================
+    - name: "SA | Build"
+      tags: [build]
+      vars:
+        sa_jobname: "{{ sa_job.prefix }}BUILD"
+      block:
+
+        - name: "SA | Recreate {{ sa_build_dsn }} empty (full build)"
+          ibm.ibm_zos_core.zos_data_set:
+            name: "{{ sa_build_dsn }}"
+            type: pdse
+            record_format: fb
+            record_length: 80
+            space_primary: 40
+            space_secondary: 20
+            space_type: cyl
+            replace: true
+            state: present
+
+        - name: "SA | Render templates/ingebbld.jcl.j2"
+          ansible.builtin.set_fact:
+            sa_build_jcl: "{{ lookup('ansible.builtin.template', playbook_dir ~ '/../templates/ingebbld.jcl.j2') | trim }}"
+
+        - name: "SA | Store the job in {{ sa_work_pds }}(BUILD)"
+          ibm.ibm_zos_core.zos_copy:
+            content: "{{ sa_build_jcl }}"
+            dest: "{{ sa_work_pds }}(BUILD)"
+            replace: true
+
+        - name: "SA | Run the build"
+          ansible.builtin.include_role:
+            name: "{{ playbook_dir }}/../roles/sa_policy_common"
+            tasks_from: run_job
+          vars:
+            sa_job_dsn: "{{ sa_work_pds }}(BUILD)"
+            sa_job_label: "Build"
+            sa_job_max_rc: "{{ sa_build.max_rc }}"
+
+    # =========================================================================
+    # activate
+    # =========================================================================
+    - name: "SA | Activate"
+      tags: [activate]
+      vars:
+        sa_jobname: "{{ sa_job.prefix }}NEWGEN"
+        _cfg_re: '^.*CONFIGURATION DATASET\s*=\s*(\S+).*$'
+      block:
+
+        - name: "SA | ACF STATUS before"
+          ibm.ibm_zos_core.zos_operator:
+            cmd: "F {{ sa_proc }},ACF STATUS"
+            verbose: false
+          register: sa_acf_before
+          changed_when: false
+
+        - name: "SA | Active configuration (model for the new generation)"
+          ansible.builtin.set_fact:
+            sa_active_config_dsn: >-
+              {{ sa_acf_before.stdout_lines | select('search', 'CONFIGURATION DATASET') | first
+                 | regex_replace(_cfg_re, '\g<1>') }}
+
+        - name: "SA | Render templates/newgen.jcl.j2"
+          ansible.builtin.set_fact:
+            sa_newgen_jcl: "{{ lookup('ansible.builtin.template', playbook_dir ~ '/../templates/newgen.jcl.j2') | trim }}"
+
+        - name: "SA | Store the job in {{ sa_work_pds }}(NEWGEN)"
+          ibm.ibm_zos_core.zos_copy:
+            content: "{{ sa_newgen_jcl }}"
+            dest: "{{ sa_work_pds }}(NEWGEN)"
+            replace: true
+
+        - name: "SA | Copy {{ sa_build_dsn }} into {{ sa_config_gdg_base }}(+1)"
+          ansible.builtin.include_role:
+            name: "{{ playbook_dir }}/../roles/sa_policy_common"
+            tasks_from: run_job
+          vars:
+            sa_job_dsn: "{{ sa_work_pds }}(NEWGEN)"
+            sa_job_label: "New generation"
+            sa_job_max_rc: 0
+            sa_job_dds: [SYSPRINT]
+
+        - name: "SA | Newest generation of {{ sa_config_gdg_base }}"
+          ansible.builtin.shell: |
+            tsocmd "LISTCAT ENT('{{ sa_config_gdg_base }}') ALL" 2>/dev/null | grep "NONVSAM--"
+          register: sa_gdg
+          changed_when: false
+
+        - name: "SA | New configuration"
+          ansible.builtin.set_fact:
+            sa_new_cfg: >-
+              {{ sa_gdg.stdout_lines | map('regex_replace', '^.*NONVSAM--(\S+).*$', '\g<1>') | sort | last }}
+
+        - name: "SA | INGAMS REFRESH CFG={{ sa_new_cfg }}"
+          ibm.ibm_zos_core.zos_operator:
+            cmd: "F {{ sa_proc }},INGAMS REFRESH CFG={{ sa_new_cfg }}"
+            wait_time: "{{ sa_refresh_wait }}"
+            verbose: false
+          register: sa_refresh
+
+        - name: "SA | Wait for ACF STATUS to show {{ sa_new_cfg }}"
+          ibm.ibm_zos_core.zos_operator:
+            cmd: "F {{ sa_proc }},ACF STATUS"
+            verbose: false
+          register: sa_acf_after
+          changed_when: false
+          until: >-
+            (sa_acf_after.stdout_lines | select('search', 'CONFIGURATION DATASET') | first | default('')
+             | regex_replace(_cfg_re, '\g<1>')) == sa_new_cfg
+          retries: 12
+          delay: 10
+
+        - name: "SA | INGLIST the new entries"
+          ibm.ibm_zos_core.zos_operator:
+            cmd: "F {{ sa_proc }},INGLIST {{ item }}"
+            verbose: false
+          register: sa_inglist
+          changed_when: false
+          loop: "{{ sa_inglist_names }}"
+
+        - name: "SA | Result"
+          ansible.builtin.debug:
+            msg: >-
+              {{ ['Previous configuration: ' ~ sa_active_config_dsn,
+                  'Active configuration  : ' ~ sa_new_cfg]
+                 + (sa_refresh.stdout_lines | select('search', 'ING[0-9]+') | list)
+                 + (sa_inglist.results | map(attribute='stdout_lines') | flatten
+                    | select('search', '^\s+[A-Z0-9@#$_]+\s+(APG|APL)\s') | list) }}

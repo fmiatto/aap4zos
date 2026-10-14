@@ -1,0 +1,14 @@
+---
+################################################################################
+# z/OS managed node paths (LTE1)
+################################################################################
+
+# The python installation home path on the z/OS managed node (target),
+# e.g, PYZ: "/usr/lpp/IBM/cyp/v3r12/pyz"
+PYZ: "path_to_python_installation_on_zos_target"
+
+# The ZOAU installation home on the z/OS managed node (target),
+# e.g, ZOAU: "/usr/lpp/IBM/zoautil"
+ZOAU: "path_to_zoau_installation_on_zos_target"
+
+ansible_python_interpreter: "{{ PYZ }}/bin/python3"

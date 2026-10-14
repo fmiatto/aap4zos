@@ -1,0 +1,69 @@
+---
+# =============================================================================
+# production_gate.yml - P6 only.  Before the production PDB is changed:
+#   - the newest Backup A (<HLQ>.SAPDB.BKP.Dyymmdd.Thhmm) must exist,
+#   - its saved .MF manifest must match the backup itself, and
+#   - it must match the production PDB member for member, so the backup
+#     holds exactly what is about to be changed (run 10_backup_clone.yml
+#     right before P6).
+#   Sets sa_gate_backup (the Backup A name).
+# =============================================================================
+- name: "SA POLICY | P6 gate - List PDB backups"
+  ibm.ibm_zos_core.zos_tso_command:
+    commands:
+      - "LISTCAT LEVEL('{{ sa_backup_pdb_prefix }}')"
+  register: sa_gate_listcat
+  failed_when: false
+  changed_when: false
+
+- name: "SA POLICY | P6 gate - Choose the newest Backup A"
+  ansible.builtin.set_fact:
+    sa_gate_backup: >-
+      {{ (sa_gate_listcat.output[0].stdout_lines | default([]))
+         | select('search', 'NONVSAM')
+         | map('split') | map('last')
+         | reject('search', '[.]MF$')
+         | select('match', sa_backup_pdb_prefix | regex_escape ~ '[.]D[0-9]{6}[.]T[0-9]{4}$')
+         | sort | last | default('') }}
+
+- name: "SA POLICY | P6 gate - Stop if there is no Backup A"
+  ansible.builtin.assert:
+    that: sa_gate_backup | length > 0
+    fail_msg: "No backup under {{ sa_backup_pdb_prefix }}. Run 10_backup_clone.yml right before P6."
+    success_msg: "Backup A: {{ sa_gate_backup }}"
+
+- name: "SA POLICY | P6 gate - Read {{ sa_gate_backup }}.MF"
+  ansible.builtin.shell: |
+    dcat "{{ sa_gate_backup }}.MF"
+  register: sa_gate_mf
+  changed_when: false
+
+- name: "SA POLICY | P6 gate - Parse the saved manifest"
+  ansible.builtin.set_fact:
+    sa_gate_expect: >-
+      {%- set out = {} -%}
+      {%- for line in sa_gate_mf.stdout_lines if line.split() | length == 3 -%}
+      {%-   set f = line.split() -%}
+      {%-   set _ = out.update({f[0]: f[1] ~ ' ' ~ f[2]}) -%}
+      {%- endfor -%}
+      {{ out }}
+
+- name: "SA POLICY | P6 gate - Verify Backup A is intact"
+  ansible.builtin.include_tasks: manifest.yml
+  vars:
+    sa_manifest_dsn: "{{ sa_gate_backup }}"
+    sa_manifest_expect: "{{ sa_gate_expect }}"
+
+- name: "SA POLICY | P6 gate - Manifest of {{ sa_pdb_dsn }}"
+  ansible.builtin.include_tasks: manifest.yml
+  vars:
+    sa_manifest_dsn: "{{ sa_pdb_dsn }}"
+
+- name: "SA POLICY | P6 gate - {{ sa_pdb_dsn }} must still match Backup A"
+  ansible.builtin.assert:
+    that: sa_manifest == sa_gate_expect
+    fail_msg: >-
+      {{ sa_pdb_dsn }} changed after {{ sa_gate_backup }} was taken
+      ({{ sa_manifest.keys() | symmetric_difference(sa_gate_expect.keys()) | list | length }}
+      member(s) added or removed). Run 10_backup_clone.yml again, then retry.
+    success_msg: "{{ sa_pdb_dsn }} matches {{ sa_gate_backup }} ({{ sa_manifest | length }} members)."

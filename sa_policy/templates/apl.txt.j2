@@ -1,0 +1,95 @@
+{#
+  =============================================================================
+  Template : apl.txt.j2
+  Purpose  : SA z/OS "Making Updates with Text Files" input that creates the
+             APG and APLs of one policy file (vars/policies/<name>.yml),
+             passed in as sa_new_policy by render_one.yml.
+  Rules    : NEW / UPD / COPY / WHERE_USED / LINK_TO_CLASS start in column 1.
+             Policy item lines are indented 1-2 columns, field lines 3+.
+             The APG section comes first so the APLs can link to it.
+             sa_update_only=true leaves out the NEW sections, to update
+             entries that already exist.
+  =============================================================================
+#}
+{% set p = sa_new_policy %}
+{% macro kv(key, value, indent=2, col=20) %}{{ ' ' * indent }}{{ '%-*s' | format(col - indent, key) }}: {{ value }}{% endmacro %}
+{% if not (sa_update_only | default(false) | bool) %}
+NEW APG             : {{ p.apg.name }}
+{{ kv('Type', p.apg.type) }}
+{{ kv('Nature', p.apg.nature) }}
+{{ kv('Short description', p.apg.description) }}
+{% for sys in p.apg.systems %}
+WHERE_USED SYS      : {{ sys }}
+{% endfor %}
+{% for apl in p.apls %}
+
+NEW APL             : {{ apl.name }}
+{{ kv('Subsystem Name', apl.subsystem) }}
+{{ kv('Category', apl.category) }}
+{% if apl.subcategory | default('') | length > 0 %}
+{{ kv('Subcategory', apl.subcategory) }}
+{% endif %}
+{{ kv('Job Type', apl.job_type) }}
+{{ kv('Job Name', apl.job_name) }}
+{{ kv('Short description', apl.description) }}
+{% if apl.link_to_class | default('') | length > 0 %}
+LINK_TO_CLASS       : {{ apl.link_to_class }}
+{% endif %}
+WHERE_USED APG      : {{ p.apg.name }}
+{% endfor %}
+{% endif %}
+{% for apl in p.apls %}
+{%   set do_info = p.update_sections.application_info and ((apl.command_prefix | default('') | length > 0) or (apl.restart_after_ipl | default('') | length > 0)) %}
+{%   set do_rels = p.update_sections.relationships and (apl.relationships | default([]) | length > 0) %}
+{%   set do_shut = p.update_sections.shutdown | default(false) and (apl.shutdown | default([]) | length > 0) %}
+{%   if do_info or do_rels or do_shut %}
+
+UPD APL             : {{ apl.name }}
+{#   Field replacement: only the fields listed here change; the others keep
+     their value (field names as in a dialog export). #}
+{%     if do_info %}
+ APPLICATION INFO (FIELD)
+{%       if apl.restart_after_ipl | default('') | length > 0 %}
+{{ kv('Restart after IPL', apl.restart_after_ipl, 3, 25) }}
+{%       endif %}
+{%       if apl.command_prefix | default('') | length > 0 %}
+{{ kv('Command Prefix', apl.command_prefix, 3, 25) }}
+{%       endif %}
+{%     endif %}
+{#   Layout from SINGSAMP(INGEFUJ3): each relationship is exactly 7 data
+     lines in this order (empty values allowed), separated by a "*" line.
+     "policy replacement" replaces all relationships of the APL. #}
+{%     if do_rels %}
+  RELATIONSHIPS                      ( policy replacement )
+{%       for rel in apl.relationships %}
+{%         if not loop.first %}
+*
+{%         endif %}
+{{ kv('Relationship Type', rel.type, 4, 37) }}
+{{ kv('Supporting Resource', rel.resource, 4, 37) }}
+{{ kv('Description', rel.description | default(''), 4, 37) }}
+{{ kv('Sequence Number', rel.sequence | default(''), 4, 37) }}
+{{ kv('Automation', rel.automation | default(''), 4, 37) }}
+{{ kv('Chaining', rel.chaining | default(''), 4, 37) }}
+{{ kv('Condition', rel.condition | default(''), 4, 37) }}
+{%       endfor %}
+{%     endif %}
+{#   Layout from a dialog export of APL CICS0001 (Data Management, Update via
+     File, option 1): separator in column 42 at every level, "Action - CMD"
+     with a dash, then Pass / Automated Function/'*' / Command Text per pass.
+     "block replacement" replaces the APL's shutdown commands. #}
+{%     if do_shut %}
+  SHUTDOWN                               ( block replacement )
+{%       for ph in apl.shutdown %}
+{{ kv('Phase', ph.phase, 4, 41) }}
+{{ kv('Mixed case', ph.mixed_case | default(''), 6, 41) }}
+      {{ '%-35s' | format('Action') }}- CMD
+{%         for ps in ph.passes %}
+{{ kv('Pass', ps.pass, 8, 41) }}
+{{ kv("Automated Function/'*'", ps.function | default(''), 8, 41) }}
+{{ kv('Command Text', ps.command, 8, 41) }}
+{%         endfor %}
+{%       endfor %}
+{%     endif %}
+{%   endif %}
+{% endfor %}

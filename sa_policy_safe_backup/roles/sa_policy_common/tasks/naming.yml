@@ -1,0 +1,86 @@
+---
+# =============================================================================
+# naming.yml - Derive every data set name the prototype uses from sa_work_hlq,
+#              so all playbooks (and the rollback) agree on them.
+#              Pass sa_stamp (Dyymmdd.Thhmm) to pin the backup names.
+# =============================================================================
+- name: "SA POLICY | Derive work data set names"
+  ansible.builtin.set_fact:
+    sa_stamp: "{{ sa_stamp | default(now(fmt='D%y%m%d.T%H%M'), true) }}"
+    sa_clone_dsn: "{{ sa_work_hlq }}.SAPDB.PROTO"
+    sa_staging_dsn: "{{ sa_work_hlq }}.SAPDB.PROTO.SOCNTL"
+    sa_work_pds: "{{ sa_work_hlq }}.SAPDB.WORK"
+    sa_backup_pdb_prefix: "{{ sa_work_hlq }}.SAPDB.BKP"
+    sa_backup_cfg_prefix: "{{ sa_work_hlq }}.SOCNTL.BKP"
+
+- name: "SA POLICY | Derive backup names for stamp {{ sa_stamp }}"
+  ansible.builtin.set_fact:
+    sa_backup_pdb_dsn: "{{ sa_backup_pdb_prefix }}.{{ sa_stamp }}"
+    sa_backup_cfg_dsn: "{{ sa_backup_cfg_prefix }}.{{ sa_stamp }}"
+
+# Every name, plus its 3-char ".MF" manifest suffix, must be a valid DSN.
+- name: "SA POLICY | Validate data set names"
+  ansible.builtin.assert:
+    that:
+      - (item ~ '.MF') | length <= 44
+      - item.split('.') | select('match', '^[A-Z@#$][A-Z0-9@#$-]{0,7}$') | list | length == item.split('.') | length
+    fail_msg: "Invalid data set name derived from sa_work_hlq: {{ item }}"
+    quiet: true
+  loop:
+    - "{{ sa_clone_dsn }}"
+    - "{{ sa_staging_dsn }}"
+    - "{{ sa_work_pds }}"
+    - "{{ sa_backup_pdb_dsn }}"
+    - "{{ sa_backup_cfg_dsn }}"
+
+# The work HLQ must never overlap the production PDB or its build output.
+- name: "SA POLICY | Ensure work names cannot touch production"
+  ansible.builtin.assert:
+    that:
+      - sa_work_hlq != sa_pdb_dsn
+      - not sa_work_hlq.startswith(sa_pdb_dsn ~ '.')
+      - not sa_work_hlq.startswith(sa_config_gdg_base)
+      - sa_clone_pdb_name != sa_pdb_name
+    fail_msg: >-
+      sa_work_hlq={{ sa_work_hlq }} overlaps production ({{ sa_pdb_dsn }},
+      {{ sa_config_gdg_base }}) or the clone PDB name equals {{ sa_pdb_name }}.
+    quiet: true
+
+# -----------------------------------------------------------------------------
+# P6 production mode: sa_target=production points P3 (30_apply_to_pdb.yml) and
+# P4 (40_build_staging.yml) at the PRODUCTION PDB instead of the clone.  It
+# needs the typed confirmation sa_confirm_production="ACTIVATE <PDB DSN>".
+# The clone names above are derived and checked first; only then are
+# sa_clone_dsn / sa_clone_pdb_name redirected, so everything that reads them
+# (batch file DDs, JCL, ENQ check) addresses production.  40_build_staging.yml
+# allocates and sets the build output (a new generation of the GDG) itself.
+# -----------------------------------------------------------------------------
+- name: "SA POLICY | P6 - Production target"
+  when: sa_target | default('clone') == 'production'
+  block:
+
+    # Only playbooks written for P6 set sa_production_capable.  Elsewhere the
+    # redirect would be destructive (10_backup_clone.yml replaces the clone,
+    # 90_rollback.yml reclone / delete_clone delete it).
+    - name: "SA POLICY | P6 - Refuse production mode in this playbook"
+      ansible.builtin.assert:
+        that: sa_production_capable | default(false) | bool
+        fail_msg: >-
+          sa_target=production is only accepted by 30_apply_to_pdb.yml,
+          40_build_staging.yml, 60_activate.yml and 90_rollback.yml
+          (refresh_previous). Remove -e sa_target=production.
+        quiet: true
+
+    - name: "SA POLICY | P6 - Require the typed production confirmation"
+      ansible.builtin.assert:
+        that: sa_confirm_production | default('') == 'ACTIVATE ' ~ sa_pdb_dsn
+        fail_msg: >-
+          sa_target=production changes {{ sa_pdb_dsn }}. Pass
+          -e "sa_confirm_production='ACTIVATE {{ sa_pdb_dsn }}'" to confirm.
+        quiet: true
+
+    - name: "SA POLICY | P6 - Point P3 / P4 at {{ sa_pdb_dsn }} ({{ sa_pdb_name }})"
+      ansible.builtin.set_fact:
+        sa_clone_dsn: "{{ sa_pdb_dsn }}"
+        sa_clone_pdb_name: "{{ sa_pdb_name }}"
+        sa_production_mode: true

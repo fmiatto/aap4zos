@@ -1,0 +1,187 @@
+---
+# =============================================================================
+# Playbook : 40_build_staging.yml                                Phase P4
+# Purpose  : Build the CLONED PDB in batch into the STAGING output data set
+#            <HLQ>.SAPDB.PROTO.SOCNTL.  The active configuration
+#            (SYSAUTO.PDB.SOCNTL.Gnnnn) is only used as the model for the
+#            staging allocation.
+#              - Staging missing or empty -> full build (TYPE=ALL, IBM rule)
+#              - Later iterations         -> sa_build.type (default MOD)
+#            P6 production mode (sa_target=production + sa_confirm_production)
+#            builds the PRODUCTION PDB into the same staging data set, emptied
+#            first (full build).  The GDG is not written here: 60_activate.yml
+#            copies the validated staging into a new generation.
+#            Results are published as AAP job artifacts:
+#              GET /api/v2/jobs/<id>/  ->  .artifacts.sa_build_result
+# Survey   :
+#   sa_proc               - SA z/OS agent PROC name (default: AUTOPROC)
+#   sa_build_force_all    - true to force a full build (default: false)
+#   sa_target             - P6 only: production
+#   sa_confirm_production - P6 only: "ACTIVATE <production PDB DSN>"
+# Rollback : 90_rollback.yml rollback_action=delete_staging
+# =============================================================================
+- name: SA POLICY | P4 Build - Batch build of the CLONE into STAGING
+  hosts: zos_host
+  environment: "{{ environment_vars }}"
+  gather_facts: false
+  vars_files:
+    - ../vars/sa_env.yml
+    - ../vars/new_apl.yml
+  vars:
+    sa_jobname: "{{ sa_job.prefix | default('SAP') }}BUILD"
+    sa_production_capable: true     # accepts P6 sa_target=production
+    # Placeholder so sa_build.systsin can reference it before "Choose build type"
+    # runs; that set_fact overrides it before the JCL is rendered.
+    sa_build_type_effective: MOD
+
+  tasks:
+
+    # Names first: sa_textupd / sa_build reference them, and reading any key
+    # (e.g. .verified) templates the whole dict.
+    - name: "SA POLICY | Derive data set names"
+      ansible.builtin.include_role:
+        name: "{{ playbook_dir }}/../roles/sa_policy_common"
+        tasks_from: naming
+
+    - name: "SA POLICY | P4 - Stop until the build job is confirmed"
+      ansible.builtin.assert:
+        that:
+          - sa_build.verified | bool
+          - sa_build.systsin | length > 0
+        fail_msg: >-
+          sa_build is not confirmed yet. Take the build command from
+          SINGSAMP(INGEBBLD) (printed by 00_discover.yml) or from the site build
+          job, set sa_build.systsin / sa_build.dd in vars/sa_env.yml pointing at
+          the clone and the staging data set, then set sa_build.verified=true.
+
+    - name: "SA POLICY | Read active configuration"
+      ansible.builtin.include_role:
+        name: "{{ playbook_dir }}/../roles/sa_policy_common"
+        tasks_from: active_config
+
+    - name: "SA POLICY | P4 - Check the clone exists"
+      ansible.builtin.include_role:
+        name: "{{ playbook_dir }}/../roles/sa_policy_common"
+        tasks_from: dataset_exists
+      vars:
+        sa_dsn: "{{ sa_clone_dsn }}"
+
+    - name: "SA POLICY | P4 - Stop if there is no clone"
+      ansible.builtin.assert:
+        that: sa_dsn_exists | bool
+        fail_msg: "{{ sa_clone_dsn }} does not exist. Run 10_backup_clone.yml and 30_apply_to_pdb.yml first."
+        quiet: true
+
+    - name: "SA POLICY | Stop if the clone is held exclusively"
+      ansible.builtin.include_role:
+        name: "{{ playbook_dir }}/../roles/sa_policy_common"
+        tasks_from: enq_check
+      vars:
+        sa_enq_dsn: "{{ sa_clone_dsn }}"
+
+    # =========================================================================
+    # Staging output: allocate like the active configuration when missing
+    # =========================================================================
+    # P6 production mode: the production PDB is built into the (work) staging
+    # data set, never into the GDG.  Start from an empty staging data set so
+    # nothing from a clone build survives, and the build is a full build.
+    # 60_activate.yml copies the validated staging into a new GDG generation.
+    - name: "SA POLICY | P6 - Empty {{ sa_staging_dsn }} for the production build"
+      ibm.ibm_zos_core.zos_data_set:
+        name: "{{ sa_staging_dsn }}"
+        state: absent
+      when: sa_production_mode | default(false) | bool
+
+    - name: "SA POLICY | P4 - Check staging {{ sa_staging_dsn }}"
+      ansible.builtin.include_role:
+        name: "{{ playbook_dir }}/../roles/sa_policy_common"
+        tasks_from: dataset_exists
+      vars:
+        sa_dsn: "{{ sa_staging_dsn }}"
+
+    - name: "SA POLICY | P4 - Allocate {{ sa_staging_dsn }} like {{ sa_active_config_dsn }}"
+      ibm.ibm_zos_core.zos_tso_command:
+        commands:
+          - "ALLOCATE DATASET('{{ sa_staging_dsn }}') LIKE('{{ sa_active_config_dsn }}') NEW CATALOG"
+      when: not (sa_dsn_exists | bool)
+
+    - name: "SA POLICY | P4 - Count staging members"
+      ansible.builtin.shell: |
+        mls "{{ sa_staging_dsn }}" 2>/dev/null | wc -l
+      register: sa_staging_count
+      changed_when: false
+
+    - name: "SA POLICY | P4 - Choose build type"
+      ansible.builtin.set_fact:
+        sa_build_type_effective: >-
+          {{ 'ALL' if (sa_staging_count.stdout | trim | int == 0 or (sa_build_force_all | default(false) | bool))
+             else sa_build.type | default('MOD') }}
+
+    - name: "SA POLICY | P4 - Build type"
+      ansible.builtin.debug:
+        msg: >-
+          {{ sa_staging_dsn }} has {{ sa_staging_count.stdout | trim }} members:
+          {{ sa_build_type_effective }} build.
+
+    # =========================================================================
+    # Render, guard, store and run the build
+    # =========================================================================
+    - name: "SA POLICY | P4 - Render templates/ingebbld.jcl.j2"
+      ansible.builtin.set_fact:
+        sa_build_jcl: "{{ lookup('ansible.builtin.template', playbook_dir ~ '/../templates/ingebbld.jcl.j2') | trim }}"
+
+    - name: "SA POLICY | JCL guard"
+      ansible.builtin.include_role:
+        name: "{{ playbook_dir }}/../roles/sa_policy_common"
+        tasks_from: jcl_guard
+      vars:
+        sa_jcl_text: "{{ sa_build_jcl }}"
+
+    - name: "SA POLICY | P4 - Show the job"
+      ansible.builtin.debug:
+        msg: "{{ sa_build_jcl.splitlines() }}"
+
+    - name: "SA POLICY | P4 - Store the job in {{ sa_work_pds }}(BUILD)"
+      ibm.ibm_zos_core.zos_copy:
+        content: "{{ sa_build_jcl }}"
+        dest: "{{ sa_work_pds }}(BUILD)"
+        replace: true
+
+    - name: "SA POLICY | P4 - Run the build"
+      ansible.builtin.include_role:
+        name: "{{ playbook_dir }}/../roles/sa_policy_common"
+        tasks_from: run_job
+      vars:
+        sa_job_dsn: "{{ sa_work_pds }}(BUILD)"
+        sa_job_label: "P4 build"
+        sa_job_max_rc: "{{ sa_build.max_rc }}"
+
+    - name: "SA POLICY | P4 - Manifest of {{ sa_staging_dsn }}"
+      ansible.builtin.include_role:
+        name: "{{ playbook_dir }}/../roles/sa_policy_common"
+        tasks_from: manifest
+      vars:
+        sa_manifest_dsn: "{{ sa_staging_dsn }}"
+
+    - name: "SA POLICY | P4 - Stop if the build produced nothing"
+      ansible.builtin.assert:
+        that: sa_manifest | length > 0
+        fail_msg: "Build job {{ sa_job_id }} ended CC {{ sa_job_rc }} but {{ sa_staging_dsn }} is empty."
+        success_msg: "{{ sa_staging_dsn }} holds {{ sa_manifest | length }} members. Next: 50_validate.yml"
+
+    # =========================================================================
+    # Publish the build record:
+    #   GET /api/v2/jobs/<id>/  ->  .artifacts.sa_build_result
+    # =========================================================================
+    - name: "SA POLICY | P4 - Publish build record as AAP job artifact"
+      ansible.builtin.set_stats:
+        data:
+          sa_build_result:
+            target: "{{ 'production' if sa_production_mode | default(false) | bool else 'clone' }}"
+            clone: "{{ sa_clone_dsn }}"
+            staging: "{{ sa_staging_dsn }}"
+            build_type: "{{ sa_build_type_effective }}"
+            job_id: "{{ sa_job_id }}"
+            ret_code: "{{ sa_job_rc_msg }} {{ sa_job_rc }}"
+            members: "{{ sa_manifest | length }}"
+            flagged_messages: "{{ sa_job_messages }}"

@@ -1,0 +1,145 @@
+---
+# =============================================================================
+# File    : vars/sa_env.yml
+# Purpose : Everything add_to_sa.yml needs to know about the target system.
+#           Values are the ones that added DB2 DBA1 on LTE1 (SA 4.3).
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# Policies to add, in order: file names in vars/policies/ without .yml.
+# All of them go into one text file, one build and one activation.
+# A file that refers to another one's APG must come after it.
+# Override with -e sa_policies=cics62   or   -e sa_policies=db2-dba1,rmf
+# ---------------------------------------------------------------------------
+sa_policies:
+  - db2-dba1
+  - cics62
+  - rmf
+
+# ---------------------------------------------------------------------------
+# SA z/OS on the target system
+# ---------------------------------------------------------------------------
+sa_proc: AUTOPROC                       # NetView/SA agent STC (F AUTOPROC,...)
+sa_pdb_name: LTEPLEX_PDB                # Policy Database name
+sa_pdb_dsn: SYSAUTO.PDB                 # Policy Database data set
+sa_config_gdg_base: SYSAUTO.PDB.SOCNTL  # Configuration GDG that SA loads
+
+# New configuration generation, allocated like the existing ones:
+# non-SMS PDSE, 3390, 40 cylinders primary, 20 secondary.
+sa_config_unit: "3390"
+sa_config_volume: LTECAT
+sa_config_space: "CYL,(40,20,10)"       # directory quantity is ignored for a PDSE
+
+# ---------------------------------------------------------------------------
+# Libraries (SA 4.3 dialog and ISPF)
+# ---------------------------------------------------------------------------
+sa_dialog_hlq: SYS1.ING
+sa_ispf_hlq: SYS1.ISP
+
+sa_dialog_libs:
+  - { dd: ISPLLIB, dsns: ["{{ sa_dialog_hlq }}.SINGLOAD"] }
+  - { dd: ISPMLIB, dsns: ["{{ sa_dialog_hlq }}.SINGMENU", "{{ sa_ispf_hlq }}.SISPMENU"] }
+  - { dd: ISPPLIB, dsns: ["{{ sa_dialog_hlq }}.SINGPENU", "{{ sa_ispf_hlq }}.SISPPENU"] }
+  - { dd: ISPSLIB, dsns: ["{{ sa_dialog_hlq }}.SINGSENU", "{{ sa_ispf_hlq }}.SISPSENU"] }
+  - { dd: ISPTLIB, dsns: ["{{ sa_dialog_hlq }}.SINGTENU", "{{ sa_ispf_hlq }}.SISPTENU"] }
+  - { dd: SYSEXEC, dsns: ["{{ sa_dialog_hlq }}.SINGTREX"] }
+  - { dd: AOFIPDB, dsns: ["{{ sa_dialog_hlq }}.SINGPDB"] }
+
+# ---------------------------------------------------------------------------
+# Work data sets (the playbook creates them)
+# ---------------------------------------------------------------------------
+sa_work_hlq: SYSAUTO.PROTO
+sa_work_pds: "{{ sa_work_hlq }}.SAPDB.WORK"        # rendered text file and JCL
+sa_source_dsn: "{{ sa_work_pds }}.UPD"             # text file, sequential
+sa_report_dsn: "{{ sa_work_pds }}.RPT"             # update report, PDS
+sa_build_dsn: "{{ sa_work_hlq }}.SAPDB.SOCNTL"     # build output, PDSE
+
+# ---------------------------------------------------------------------------
+# Batch jobs
+#   //SAPTXUPD JOB MSGCLASS=X,CLASS=A,NOTIFY=&SYSUID,
+#   //         REGION=0M,TIME=NOLIMIT
+# ---------------------------------------------------------------------------
+sa_job:
+  prefix: SAP                     # job name = prefix + step suffix, max 8 chars
+  account: ''
+  programmer: ''
+  class: A
+  msgclass: X
+  notify: '&SYSUID'
+  region: 0M
+  time: NOLIMIT
+  poll_retries: 60                # 60 x 10s = 10 minutes
+  poll_delay: 10
+
+# A job fails on a completion code above its max_rc or on one of these lines.
+sa_fail_message_regex: '\b(AOF|ING|ISP|IKJ)[A-Z0-9]{3,6}[EWS]\b|\bERROR\b|\bWARNING\b|REXX error condition|Invalid data set status'
+
+sa_refresh_wait: 30               # seconds to collect the INGAMS REFRESH response
+
+# ---------------------------------------------------------------------------
+# Text-file update: SYS1.ING.SINGSAMP(INGEBFLT)
+#   AOFFBFL1 pdb_name, DD:PDB, DD:PDBUPD, DD:PDBRPT
+#   PDBUPD must be sequential (AOFFBFL1 opens it by data set name and drops a
+#   member name); PDBRPT must be a PDS (LMINIT ENQ(SHRW)).
+# ---------------------------------------------------------------------------
+sa_textupd:
+  max_rc: 0
+  dd:
+    - { name: AOFTABL, spec: "SPACE=(TRK,(15,15,15)),RECFM=FB,LRECL=80,DSORG=PO" }
+    - { name: PDB, spec: "DISP=OLD,DSN={{ sa_pdb_dsn }}" }
+    - { name: PDBUPD, spec: "DISP=OLD,DSN={{ sa_source_dsn }}" }
+    - { name: PDBRPT, spec: "DISP=OLD,DSN={{ sa_report_dsn }}" }
+    - { name: ISPWRK1, spec: "UNIT=SYSALLDA,SPACE=(CYL,(5,10)),LRECL=256,RECFM=FB" }
+    - { name: ISPWRK2, spec: "UNIT=SYSALLDA,SPACE=(CYL,(5,10)),LRECL=256,RECFM=FB" }
+    - { name: ISPWRK3, spec: "UNIT=SYSALLDA,SPACE=(CYL,(5,10)),LRECL=256,RECFM=FB" }
+    - { name: ISPWRK4, spec: "UNIT=SYSALLDA,SPACE=(CYL,(5,10)),LRECL=256,RECFM=FB" }
+    - { name: ISPCTL0, spec: "UNIT=SYSALLDA,SPACE=(CYL,(5,10)),LRECL=80,RECFM=FB" }
+    - { name: ISPCTL1, spec: "UNIT=SYSALLDA,SPACE=(CYL,(5,10)),LRECL=80,RECFM=FB" }
+    - { name: ISPCTL2, spec: "UNIT=SYSALLDA,SPACE=(CYL,(5,10)),LRECL=80,RECFM=FB" }
+    - { name: ISPCTL3, spec: "UNIT=SYSALLDA,SPACE=(CYL,(5,10)),LRECL=80,RECFM=FB" }
+    - { name: ISPCTL4, spec: "UNIT=SYSALLDA,SPACE=(CYL,(5,10)),LRECL=80,RECFM=FB" }
+    - { name: SYSPRINT, spec: "SYSOUT=*" }
+    - { name: SYSOUT, spec: "SYSOUT=*" }
+  systsin:
+    - " ISPSTART CMD(AOFFBFL1 +"
+    - "              {{ sa_pdb_name }}, +"
+    - "              DD:PDB, +"
+    - "              DD:PDBUPD, +"
+    - "              DD:PDBRPT) +"
+    - "              NEWAPPL(AOF) BDISPMAX(999999)"
+
+# ---------------------------------------------------------------------------
+# Build: SYS1.ING.SINGSAMP(INGEBBLD), always a full build (ALL) into an empty
+# sa_build_dsn.
+#   AOFFBBL1 type, name, ALL|MODIFIED, sysplex, option, config,
+#            DD:PDB, pdb_name, enterprise, DD:SOCNTL
+#   Enterprise * = the name stored in the PDB.
+# ---------------------------------------------------------------------------
+sa_build:
+  max_rc: 0
+  dd:
+    - { name: PDB, spec: "DISP=SHR,DSN={{ sa_pdb_dsn }}" }
+    - { name: SOCNTL, spec: "DISP=OLD,DSN={{ sa_build_dsn }}" }
+    - { name: ISPWRK1, spec: "UNIT=SYSALLDA,SPACE=(CYL,(5,10)),LRECL=256,RECFM=FB" }
+    - { name: ISPWRK2, spec: "UNIT=SYSALLDA,SPACE=(CYL,(5,10)),LRECL=256,RECFM=FB" }
+    - { name: ISPWRK3, spec: "UNIT=SYSALLDA,SPACE=(CYL,(5,10)),LRECL=256,RECFM=FB" }
+    - { name: ISPWRK4, spec: "UNIT=SYSALLDA,SPACE=(CYL,(5,10)),LRECL=256,RECFM=FB" }
+    - { name: ISPCTL0, spec: "UNIT=SYSALLDA,SPACE=(CYL,(5,10)),LRECL=80,RECFM=FB" }
+    - { name: ISPCTL1, spec: "UNIT=SYSALLDA,SPACE=(CYL,(5,10)),LRECL=80,RECFM=FB" }
+    - { name: ISPCTL2, spec: "UNIT=SYSALLDA,SPACE=(CYL,(5,10)),LRECL=80,RECFM=FB" }
+    - { name: ISPCTL3, spec: "UNIT=SYSALLDA,SPACE=(CYL,(5,10)),LRECL=80,RECFM=FB" }
+    - { name: ISPCTL4, spec: "UNIT=SYSALLDA,SPACE=(CYL,(5,10)),LRECL=80,RECFM=FB" }
+    - { name: SYSPRINT, spec: "SYSOUT=*" }
+    - { name: SYSOUT, spec: "SYSOUT=*" }
+  systsin:
+    - " ISPSTART CMD(AOFFBBL1 *,+"
+    - "                       *,+"
+    - "                       ALL,+"
+    - "                       *,+"
+    - "                       1,+"
+    - "                       0,+"
+    - "                       DD:PDB,+"
+    - "                       {{ sa_pdb_name }},+"
+    - "                       *,+"
+    - "                       DD:SOCNTL) +"
+    - "                       NEWAPPL(AOF) BDISPMAX(999999)"

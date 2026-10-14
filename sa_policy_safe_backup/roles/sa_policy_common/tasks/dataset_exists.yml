@@ -1,0 +1,15 @@
+---
+# =============================================================================
+# dataset_exists.yml - Input: sa_dsn.  Sets sa_dsn_exists (bool).
+# =============================================================================
+- name: "SA POLICY | LISTDS - Check whether {{ sa_dsn }} exists"
+  ibm.ibm_zos_core.zos_tso_command:
+    commands:
+      - "LISTDS '{{ sa_dsn }}'"
+  register: sa_listds
+  failed_when: false
+  changed_when: false
+
+- name: "SA POLICY | LISTDS - Record result for {{ sa_dsn }}"
+  ansible.builtin.set_fact:
+    sa_dsn_exists: "{{ (sa_listds.output | default([{}]))[0].rc | default(8) | int == 0 }}"

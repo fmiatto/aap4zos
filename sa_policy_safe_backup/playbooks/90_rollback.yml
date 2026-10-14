@@ -1,0 +1,308 @@
+---
+# =============================================================================
+# Playbook : 90_rollback.yml                                     Phase P7
+# Purpose  : Undo any prototype step.  Pick one rollback_action:
+#              delete_staging          P4 rollback: delete the staging output
+#              reclone                 P3 rollback: rebuild the clone from Backup A
+#              delete_clone            P1 rollback: delete the clone
+#              restore_production_pdb  P6/P7 only: restore SYSAUTO.PDB from Backup A
+#              refresh_previous        P6 only: INGAMS REFRESH back to the
+#                                      generation that was active before
+#            Backup A is the newest <HLQ>.SAPDB.BKP.* unless sa_backup_pdb is
+#            given.  Before it is used, it is checked against its .MF manifest.
+#            restore_production_pdb also needs
+#              sa_confirm_production_restore: "RESTORE <production PDB DSN>"
+#            and first takes a fresh safety backup of the current PDB.
+#            refresh_previous needs sa_target=production, the P6
+#            sa_confirm_production and sa_previous_cfg.
+#            Results are published as AAP job artifacts:
+#              GET /api/v2/jobs/<id>/  ->  .artifacts.sa_rollback
+# Survey   :
+#   rollback_action               - one of the actions above (required)
+#   sa_backup_pdb                 - optional Backup A data set name
+#   sa_confirm_production_restore - typed confirmation for the production restore
+#   sa_previous_cfg               - refresh_previous: generation to go back to
+# =============================================================================
+- name: SA POLICY | P7 Rollback - Undo a prototype step
+  hosts: zos_host
+  environment: "{{ environment_vars }}"
+  gather_facts: false
+  vars_files:
+    - ../vars/sa_env.yml
+    - ../vars/new_apl.yml
+  vars:
+    # Production mode only for refresh_previous: with it, sa_clone_dsn would
+    # name the production PDB, which reclone / delete_clone would delete.
+    sa_production_capable: "{{ rollback_action | default('') == 'refresh_previous' }}"
+
+  tasks:
+
+    - name: "SA POLICY | P7 - Validate rollback_action"
+      ansible.builtin.assert:
+        that: rollback_action | default('') in ['delete_staging', 'reclone', 'delete_clone', 'restore_production_pdb', 'refresh_previous']
+        fail_msg: >-
+          Set rollback_action to delete_staging, reclone, delete_clone,
+          restore_production_pdb or refresh_previous.
+
+    - name: "SA POLICY | Derive data set names"
+      ansible.builtin.include_role:
+        name: "{{ playbook_dir }}/../roles/sa_policy_common"
+        tasks_from: naming
+
+    # =========================================================================
+    # delete_staging / delete_clone
+    # =========================================================================
+    - name: "SA POLICY | P7 - Delete {{ sa_staging_dsn if rollback_action == 'delete_staging' else sa_clone_dsn }}"
+      ibm.ibm_zos_core.zos_data_set:
+        name: "{{ sa_staging_dsn if rollback_action == 'delete_staging' else sa_clone_dsn }}"
+        state: absent
+      register: sa_rb_delete
+      when: rollback_action in ['delete_staging', 'delete_clone']
+
+    # =========================================================================
+    # reclone / restore_production_pdb need a verified Backup A
+    # =========================================================================
+    - name: "SA POLICY | P7 - Locate and verify Backup A"
+      when: rollback_action in ['reclone', 'restore_production_pdb']
+      block:
+
+        - name: "SA POLICY | P7 - List PDB backups"
+          ibm.ibm_zos_core.zos_tso_command:
+            commands:
+              - "LISTCAT LEVEL('{{ sa_backup_pdb_prefix }}')"
+          register: sa_rb_listcat
+          failed_when: false
+          changed_when: false
+
+        - name: "SA POLICY | P7 - Choose Backup A"
+          ansible.builtin.set_fact:
+            sa_rb_backup: >-
+              {{ sa_backup_pdb | default(
+                   (sa_rb_listcat.output[0].stdout_lines | default([]))
+                   | select('search', 'NONVSAM')
+                   | map('split') | map('last')
+                   | reject('search', '[.]MF$')
+                   | select('match', sa_backup_pdb_prefix | regex_escape ~ '[.]D[0-9]{6}[.]T[0-9]{4}$')
+                   | sort | last | default(''), true) }}
+
+        - name: "SA POLICY | P7 - Stop if no Backup A was found"
+          ansible.builtin.assert:
+            that: sa_rb_backup | length > 0
+            fail_msg: "No backup found under {{ sa_backup_pdb_prefix }}. Run 10_backup_clone.yml first."
+            success_msg: "Backup A: {{ sa_rb_backup }}"
+
+        - name: "SA POLICY | P7 - Read the saved manifest {{ sa_rb_backup }}.MF"
+          ansible.builtin.shell: |
+            dcat "{{ sa_rb_backup }}.MF"
+          register: sa_rb_mf
+          changed_when: false
+
+        - name: "SA POLICY | P7 - Parse the saved manifest"
+          ansible.builtin.set_fact:
+            sa_rb_expect: >-
+              {%- set out = {} -%}
+              {%- for line in sa_rb_mf.stdout_lines if line.split() | length == 3 -%}
+              {%-   set f = line.split() -%}
+              {%-   set _ = out.update({f[0]: f[1] ~ ' ' ~ f[2]}) -%}
+              {%- endfor -%}
+              {{ out }}
+
+        - name: "SA POLICY | P7 - Verify Backup A is intact"
+          ansible.builtin.include_role:
+            name: "{{ playbook_dir }}/../roles/sa_policy_common"
+            tasks_from: manifest
+          vars:
+            sa_manifest_dsn: "{{ sa_rb_backup }}"
+            sa_manifest_expect: "{{ sa_rb_expect }}"
+
+    # =========================================================================
+    # reclone: rebuild the clone from Backup A
+    # =========================================================================
+    - name: "SA POLICY | P7 - Rebuild {{ sa_clone_dsn }} from Backup A"
+      when: rollback_action == 'reclone'
+      block:
+
+        - name: "SA POLICY | Stop if the clone is held exclusively"
+          ansible.builtin.include_role:
+            name: "{{ playbook_dir }}/../roles/sa_policy_common"
+            tasks_from: enq_check
+          vars:
+            sa_enq_dsn: "{{ sa_clone_dsn }}"
+
+        - name: "SA POLICY | P7 - Delete the clone"
+          ibm.ibm_zos_core.zos_data_set:
+            name: "{{ sa_clone_dsn }}"
+            state: absent
+
+        - name: "SA POLICY | P7 - Copy Backup A to the clone"
+          ibm.ibm_zos_core.zos_copy:
+            src: "{{ sa_rb_backup }}"
+            dest: "{{ sa_clone_dsn }}"
+            remote_src: true
+
+        - name: "SA POLICY | P7 - Verify the clone"
+          ansible.builtin.include_role:
+            name: "{{ playbook_dir }}/../roles/sa_policy_common"
+            tasks_from: manifest
+          vars:
+            sa_manifest_dsn: "{{ sa_clone_dsn }}"
+            sa_manifest_expect: "{{ sa_rb_expect }}"
+
+    # =========================================================================
+    # restore_production_pdb: only with the typed confirmation
+    # =========================================================================
+    - name: "SA POLICY | P7 - Restore {{ sa_pdb_dsn }} from Backup A"
+      when: rollback_action == 'restore_production_pdb'
+      block:
+
+        - name: "SA POLICY | P7 - Require typed confirmation"
+          ansible.builtin.assert:
+            that: sa_confirm_production_restore | default('') == 'RESTORE ' ~ sa_pdb_dsn
+            fail_msg: >-
+              Restoring the production PDB needs
+              sa_confirm_production_restore="RESTORE {{ sa_pdb_dsn }}".
+
+        - name: "SA POLICY | Stop if the production PDB is held exclusively"
+          ansible.builtin.include_role:
+            name: "{{ playbook_dir }}/../roles/sa_policy_common"
+            tasks_from: enq_check
+          vars:
+            sa_enq_dsn: "{{ sa_pdb_dsn }}"
+
+        - name: "SA POLICY | P7 - Safety backup of the current PDB to {{ sa_backup_pdb_dsn }}"
+          ibm.ibm_zos_core.zos_copy:
+            src: "{{ sa_pdb_dsn }}"
+            dest: "{{ sa_backup_pdb_dsn }}"
+            remote_src: true
+
+        - name: "SA POLICY | P7 - Manifest of the current PDB"
+          ansible.builtin.include_role:
+            name: "{{ playbook_dir }}/../roles/sa_policy_common"
+            tasks_from: manifest
+          vars:
+            sa_manifest_dsn: "{{ sa_pdb_dsn }}"
+
+        - name: "SA POLICY | P7 - Keep current PDB manifest"
+          ansible.builtin.set_fact:
+            sa_rb_current: "{{ sa_manifest }}"
+            sa_rb_current_text: "{{ sa_manifest_text }}"
+
+        - name: "SA POLICY | P7 - Verify the safety backup"
+          ansible.builtin.include_role:
+            name: "{{ playbook_dir }}/../roles/sa_policy_common"
+            tasks_from: manifest
+          vars:
+            sa_manifest_dsn: "{{ sa_backup_pdb_dsn }}"
+            sa_manifest_expect: "{{ sa_rb_current }}"
+
+        - name: "SA POLICY | P7 - Save the safety backup manifest"
+          ibm.ibm_zos_core.zos_data_set:
+            name: "{{ sa_backup_pdb_dsn }}.MF"
+            type: seq
+            record_format: fb
+            record_length: 80
+            space_primary: 1
+            space_secondary: 1
+            space_type: trk
+            state: present
+
+        - name: "SA POLICY | P7 - Write the safety backup manifest"
+          ibm.ibm_zos_core.zos_copy:
+            content: "{{ sa_rb_current_text }}"
+            dest: "{{ sa_backup_pdb_dsn }}.MF"
+            replace: true
+
+        # Member by member, so the production data set keeps its allocation
+        # (a whole-PDS copy with replace would delete and reallocate it).
+        - name: "SA POLICY | P7 - Copy Backup A members over {{ sa_pdb_dsn }}"
+          ibm.ibm_zos_core.zos_copy:
+            src: "{{ sa_rb_backup }}({{ item }})"
+            dest: "{{ sa_pdb_dsn }}({{ item }})"
+            remote_src: true
+            replace: true
+          loop: "{{ sa_rb_expect.keys() | list }}"
+
+        - name: "SA POLICY | P7 - Remove members added after Backup A"
+          ansible.builtin.shell: |
+            mrm "{{ sa_pdb_dsn }}({{ item }})"
+          loop: "{{ sa_rb_current.keys() | difference(sa_rb_expect.keys()) }}"
+
+        - name: "SA POLICY | P7 - Verify the restored PDB"
+          ansible.builtin.include_role:
+            name: "{{ playbook_dir }}/../roles/sa_policy_common"
+            tasks_from: manifest
+          vars:
+            sa_manifest_dsn: "{{ sa_pdb_dsn }}"
+            sa_manifest_expect: "{{ sa_rb_expect }}"
+
+    # =========================================================================
+    # refresh_previous: P6 rollback - reload the configuration that was active
+    # before 60_activate.yml (it prints sa_previous_cfg).
+    # =========================================================================
+    - name: "SA POLICY | P7 - Refresh back to {{ sa_previous_cfg | default('?') }}"
+      when: rollback_action == 'refresh_previous'
+      block:
+
+        - name: "SA POLICY | P7 - Require production mode and sa_previous_cfg"
+          ansible.builtin.assert:
+            that:
+              - sa_production_mode | default(false) | bool
+              - sa_previous_cfg | default('') is match(sa_config_gdg_base | regex_escape ~ '[.]G[0-9]{4}V[0-9]{2}$')
+            fail_msg: >-
+              refresh_previous changes the running configuration. Pass
+              -e sa_target=production -e "sa_confirm_production='ACTIVATE {{ sa_pdb_dsn }}'"
+              and -e sa_previous_cfg=<generation of {{ sa_config_gdg_base }} printed by 60_activate.yml>.
+
+        - name: "SA POLICY | P7 - {{ sa_previous_cfg }} must exist"
+          ansible.builtin.include_role:
+            name: "{{ playbook_dir }}/../roles/sa_policy_common"
+            tasks_from: dataset_exists
+          vars:
+            sa_dsn: "{{ sa_previous_cfg }}"
+
+        - name: "SA POLICY | P7 - Stop if {{ sa_previous_cfg }} is missing"
+          ansible.builtin.assert:
+            that: sa_dsn_exists | bool
+            fail_msg: "{{ sa_previous_cfg }} does not exist."
+            quiet: true
+
+        - name: "SA POLICY | P7 - INGAMS REFRESH CFG={{ sa_previous_cfg }}"
+          ibm.ibm_zos_core.zos_operator:
+            cmd: "F {{ sa_proc }},INGAMS REFRESH CFG={{ sa_previous_cfg }}"
+            wait_time: "{{ sa_p6_refresh_wait }}"
+            verbose: false
+          register: sa_rb_refresh
+
+        - name: "SA POLICY | P7 - Refresh response"
+          ansible.builtin.debug:
+            msg: "{{ sa_rb_refresh.stdout_lines }}"
+
+        - name: "SA POLICY | P7 - Wait for ACF STATUS to show {{ sa_previous_cfg }}"
+          ibm.ibm_zos_core.zos_operator:
+            cmd: "F {{ sa_proc }},ACF STATUS"
+            verbose: false
+          register: sa_rb_acf
+          changed_when: false
+          until: >-
+            (sa_rb_acf.stdout_lines | select('search', 'CONFIGURATION DATASET') | first | default('')
+             | regex_replace('^.*CONFIGURATION DATASET\s*=\s*(\S+).*$', '\g<1>')) == sa_previous_cfg
+          retries: 12
+          delay: 10
+
+        - name: "SA POLICY | P7 - Active configuration"
+          ansible.builtin.debug:
+            msg: "{{ sa_rb_acf.stdout_lines | select('search', 'AOF00[56]I') | list }}"
+
+    # =========================================================================
+    # Publish the rollback record:
+    #   GET /api/v2/jobs/<id>/  ->  .artifacts.sa_rollback
+    # =========================================================================
+    - name: "SA POLICY | P7 - Publish rollback record as AAP job artifact"
+      ansible.builtin.set_stats:
+        data:
+          sa_rollback:
+            action: "{{ rollback_action }}"
+            backup_used: "{{ sa_rb_backup | default('') }}"
+            safety_backup: "{{ sa_backup_pdb_dsn if rollback_action == 'restore_production_pdb' else '' }}"
+            clone: "{{ sa_clone_dsn }}"
+            staging: "{{ sa_staging_dsn }}"

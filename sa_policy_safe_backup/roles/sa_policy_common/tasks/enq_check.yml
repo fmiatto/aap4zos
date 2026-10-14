@@ -1,0 +1,28 @@
+---
+# =============================================================================
+# enq_check.yml - Input: sa_enq_dsn.
+#   Fail cleanly when any task holds or waits for an EXCLUSIVE ENQ on the data
+#   set (e.g. the Customization Dialog updating the PDB), rather than letting a
+#   copy or batch step wait forever.  Shared holders are only reported.
+# =============================================================================
+- name: "SA POLICY | D GRS - ENQ holders of {{ sa_enq_dsn }}"
+  ibm.ibm_zos_core.zos_operator:
+    cmd: "D GRS,RES=(*,{{ sa_enq_dsn }})"
+    verbose: false
+  register: sa_grs
+  changed_when: false
+
+- name: "SA POLICY | D GRS - Evaluate ENQ holders of {{ sa_enq_dsn }}"
+  ansible.builtin.set_fact:
+    sa_enq_lines: "{{ sa_grs.stdout_lines | default([]) }}"
+
+- name: "SA POLICY | D GRS - Show ENQ holders of {{ sa_enq_dsn }}"
+  ansible.builtin.debug:
+    msg: "{{ sa_enq_lines }}"
+
+- name: "SA POLICY | D GRS - Stop if {{ sa_enq_dsn }} is held exclusively"
+  ansible.builtin.fail:
+    msg: >-
+      {{ sa_enq_dsn }} is held or awaited EXCLUSIVE (see D GRS output above).
+      Ask the holder to leave the Customization Dialog, then re-run.
+  when: sa_enq_lines | select('search', '(^|\W)EXCL(USIVE)?(\W|$)') | list | length > 0

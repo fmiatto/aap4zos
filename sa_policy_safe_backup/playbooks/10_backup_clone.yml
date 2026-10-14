@@ -1,0 +1,204 @@
+---
+# =============================================================================
+# Playbook : 10_backup_clone.yml                                 Phase P1
+# Purpose  : Back up the production PDB and the active configuration, and make
+#            the CLONE that every later phase works on.  Production is only read.
+#              Backup A : <HLQ>.SAPDB.BKP.Dyymmdd.Thhmm   (PDB, golden copy)
+#              Backup B : <HLQ>.SOCNTL.BKP.Dyymmdd.Thhmm  (active configuration)
+#              Clone    : <HLQ>.SAPDB.PROTO               (all changes go here)
+#            Each copy is verified member by member against its source (z/OS
+#            UNIX cksum), and the manifest is saved next to each backup as
+#            <backup>.MF.
+#            Results are published as AAP job artifacts:
+#              GET /api/v2/jobs/<id>/  ->  .artifacts.sa_backup
+# Survey   :
+#   sa_proc           - SA z/OS agent PROC name (default: AUTOPROC)
+#   sa_replace_clone  - true to rebuild an existing clone (default: false)
+# Rollback : delete the clone (90_rollback.yml rollback_action=delete_clone).
+# =============================================================================
+- name: SA POLICY | P1 Backup and clone - Protect production, create the work copy
+  hosts: zos_host
+  environment: "{{ environment_vars }}"
+  gather_facts: false
+  vars_files:
+    - ../vars/sa_env.yml
+    - ../vars/new_apl.yml
+
+  tasks:
+
+    - name: "SA POLICY | Derive data set names"
+      ansible.builtin.include_role:
+        name: "{{ playbook_dir }}/../roles/sa_policy_common"
+        tasks_from: naming
+
+    - name: "SA POLICY | Read active configuration"
+      ansible.builtin.include_role:
+        name: "{{ playbook_dir }}/../roles/sa_policy_common"
+        tasks_from: active_config
+
+    - name: "SA POLICY | Stop if the PDB is held exclusively"
+      ansible.builtin.include_role:
+        name: "{{ playbook_dir }}/../roles/sa_policy_common"
+        tasks_from: enq_check
+      vars:
+        sa_enq_dsn: "{{ sa_pdb_dsn }}"
+
+    # =========================================================================
+    # Pre-checks: backups for this stamp must be new; an existing clone is
+    # only replaced when sa_replace_clone is true.
+    # =========================================================================
+    - name: "SA POLICY | P1 - LISTDS the target data sets"
+      ibm.ibm_zos_core.zos_tso_command:
+        commands:
+          - "LISTDS '{{ item }}'"
+      register: sa_p1_targets
+      failed_when: false
+      changed_when: false
+      loop:
+        - "{{ sa_backup_pdb_dsn }}"
+        - "{{ sa_backup_cfg_dsn }}"
+        - "{{ sa_clone_dsn }}"
+
+    - name: "SA POLICY | P1 - Record which targets exist"
+      ansible.builtin.set_fact:
+        sa_p1_exists: >-
+          {%- set out = {} -%}
+          {%- for r in sa_p1_targets.results -%}
+          {%-   set _ = out.update({r.item: (r.output | default([{}]))[0].rc | default(8) | int == 0}) -%}
+          {%- endfor -%}
+          {{ out }}
+
+    - name: "SA POLICY | P1 - Stop if a backup for stamp {{ sa_stamp }} already exists"
+      ansible.builtin.assert:
+        that:
+          - not sa_p1_exists[sa_backup_pdb_dsn]
+          - not sa_p1_exists[sa_backup_cfg_dsn]
+        fail_msg: "Backups for {{ sa_stamp }} already exist. Wait a minute or pass a new sa_stamp."
+        quiet: true
+
+    - name: "SA POLICY | P1 - Stop if the clone exists and may not be replaced"
+      ansible.builtin.assert:
+        that: not sa_p1_exists[sa_clone_dsn] or (sa_replace_clone | default(false) | bool)
+        fail_msg: >-
+          Clone {{ sa_clone_dsn }} already exists. Re-run with sa_replace_clone=true to
+          rebuild it from production, or use 90_rollback.yml rollback_action=reclone.
+        quiet: true
+
+    # =========================================================================
+    # Source manifests (taken before copying so a concurrent change is caught)
+    # =========================================================================
+    - name: "SA POLICY | P1 - Manifest of {{ sa_pdb_dsn }}"
+      ansible.builtin.include_role:
+        name: "{{ playbook_dir }}/../roles/sa_policy_common"
+        tasks_from: manifest
+      vars:
+        sa_manifest_dsn: "{{ sa_pdb_dsn }}"
+
+    - name: "SA POLICY | P1 - Keep PDB manifest"
+      ansible.builtin.set_fact:
+        sa_pdb_manifest: "{{ sa_manifest }}"
+        sa_pdb_manifest_text: "{{ sa_manifest_text }}"
+
+    - name: "SA POLICY | P1 - Manifest of {{ sa_active_config_dsn }}"
+      ansible.builtin.include_role:
+        name: "{{ playbook_dir }}/../roles/sa_policy_common"
+        tasks_from: manifest
+      vars:
+        sa_manifest_dsn: "{{ sa_active_config_dsn }}"
+
+    - name: "SA POLICY | P1 - Keep configuration manifest"
+      ansible.builtin.set_fact:
+        sa_cfg_manifest: "{{ sa_manifest }}"
+        sa_cfg_manifest_text: "{{ sa_manifest_text }}"
+
+    # =========================================================================
+    # Backup A, Backup B, Clone
+    # =========================================================================
+    - name: "SA POLICY | P1 - Delete the old clone {{ sa_clone_dsn }}"
+      ibm.ibm_zos_core.zos_data_set:
+        name: "{{ sa_clone_dsn }}"
+        state: absent
+      when: sa_p1_exists[sa_clone_dsn]
+
+    - name: "SA POLICY | P1 - Copy {{ item.src }} to {{ item.dest }}"
+      ibm.ibm_zos_core.zos_copy:
+        src: "{{ item.src }}"
+        dest: "{{ item.dest }}"
+        remote_src: true
+      loop:
+        - { src: "{{ sa_pdb_dsn }}", dest: "{{ sa_backup_pdb_dsn }}" }
+        - { src: "{{ sa_active_config_dsn }}", dest: "{{ sa_backup_cfg_dsn }}" }
+        - { src: "{{ sa_pdb_dsn }}", dest: "{{ sa_clone_dsn }}" }
+
+    # =========================================================================
+    # Verify every copy member by member against its source manifest
+    # =========================================================================
+    - name: "SA POLICY | P1 - Verify copies against their source manifests"
+      ansible.builtin.include_role:
+        name: "{{ playbook_dir }}/../roles/sa_policy_common"
+        tasks_from: manifest
+      vars:
+        sa_manifest_dsn: "{{ sa_copy.dsn }}"
+        sa_manifest_expect: "{{ sa_copy.expect }}"
+      loop:
+        - { dsn: "{{ sa_backup_pdb_dsn }}", expect: "{{ sa_pdb_manifest }}" }
+        - { dsn: "{{ sa_backup_cfg_dsn }}", expect: "{{ sa_cfg_manifest }}" }
+        - { dsn: "{{ sa_clone_dsn }}", expect: "{{ sa_pdb_manifest }}" }
+      loop_control:
+        loop_var: sa_copy
+        label: "{{ sa_copy.dsn }}"
+
+    # =========================================================================
+    # Save each manifest next to its backup (<backup>.MF) for the rollback
+    # =========================================================================
+    - name: "SA POLICY | P1 - Allocate manifest data sets"
+      ibm.ibm_zos_core.zos_data_set:
+        name: "{{ item }}.MF"
+        type: seq
+        record_format: fb
+        record_length: 80
+        space_primary: 1
+        space_secondary: 1
+        space_type: trk
+        state: present
+      loop:
+        - "{{ sa_backup_pdb_dsn }}"
+        - "{{ sa_backup_cfg_dsn }}"
+
+    - name: "SA POLICY | P1 - Write manifests"
+      ibm.ibm_zos_core.zos_copy:
+        content: "{{ item.text }}"
+        dest: "{{ item.dsn }}.MF"
+        replace: true
+      loop:
+        - { dsn: "{{ sa_backup_pdb_dsn }}", text: "{{ sa_pdb_manifest_text }}" }
+        - { dsn: "{{ sa_backup_cfg_dsn }}", text: "{{ sa_cfg_manifest_text }}" }
+      loop_control:
+        label: "{{ item.dsn }}.MF"
+
+    - name: "SA POLICY | P1 - Checkpoint"
+      ansible.builtin.debug:
+        msg:
+          - "Backup A (PDB)    : {{ sa_backup_pdb_dsn }} ({{ sa_pdb_manifest | length }} members, verified)"
+          - "Backup B (config) : {{ sa_backup_cfg_dsn }} ({{ sa_cfg_manifest | length }} members, verified) from {{ sa_active_config_dsn }}"
+          - "Clone             : {{ sa_clone_dsn }} ({{ sa_pdb_manifest | length }} members, verified)"
+          - "Register the clone in the Customization Dialog as {{ sa_clone_pdb_name }} if the P3/P4 commands address PDBs by name."
+          - "Rollback: 90_rollback.yml rollback_action=delete_clone"
+
+    # =========================================================================
+    # Publish the backup record:
+    #   GET /api/v2/jobs/<id>/  ->  .artifacts.sa_backup
+    # =========================================================================
+    - name: "SA POLICY | P1 - Publish backup record as AAP job artifact"
+      ansible.builtin.set_stats:
+        data:
+          sa_backup:
+            stamp: "{{ sa_stamp }}"
+            pdb_source: "{{ sa_pdb_dsn }}"
+            pdb_backup: "{{ sa_backup_pdb_dsn }}"
+            pdb_members: "{{ sa_pdb_manifest | length }}"
+            config_source: "{{ sa_active_config_dsn }}"
+            config_token: "{{ sa_active_config_token }}"
+            config_backup: "{{ sa_backup_cfg_dsn }}"
+            config_members: "{{ sa_cfg_manifest | length }}"
+            clone: "{{ sa_clone_dsn }}"

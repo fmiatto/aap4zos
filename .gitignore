@@ -2,3 +2,10 @@
 .DS_Store
 *__pycache__*
 inventory.yml
+# Local test inventory with SSH password (sa_policy)
+sa_policy/inventory/local/
+# 00_discover.yml reports (may hold system output)
+sa_policy/output/
+# Backup of the safe prototype: same local-only folders
+sa_policy_safe_backup/inventory/local/
+sa_policy_safe_backup/output/

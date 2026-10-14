@@ -1,0 +1,35 @@
+---
+# =============================================================================
+# active_config.yml - Read the active configuration data set from the running
+#                     agent (F <proc>,ACF STATUS -> AOF006I CONFIGURATION
+#                     DATASET = ...).  Sets sa_active_config_dsn and
+#                     sa_active_config_token.
+# =============================================================================
+- name: "SA POLICY | ACF STATUS - Read active configuration"
+  ibm.ibm_zos_core.zos_operator:
+    cmd: "F {{ sa_proc }},ACF STATUS"
+    verbose: false
+  register: sa_acf_status
+  changed_when: false
+
+- name: "SA POLICY | ACF STATUS - Parse configuration data set and token"
+  ansible.builtin.set_fact:
+    sa_active_config_dsn: >-
+      {{ (sa_acf_lines | select('search', 'CONFIGURATION DATASET') | first | default(''))
+         | regex_replace('^.*CONFIGURATION DATASET\s*=\s*(\S+).*$', '\g<1>') }}
+    sa_active_config_token: >-
+      {{ (sa_acf_lines | select('search', 'CONFIGURATION TOKEN') | first | default(''))
+         | regex_replace('^.*CONFIGURATION TOKEN\s*=\s*(\S+).*$', '\g<1>') }}
+  vars:
+    sa_acf_lines: "{{ sa_acf_status.stdout_lines | default([]) }}"
+
+- name: "SA POLICY | ACF STATUS - Confirm the active configuration was found"
+  ansible.builtin.assert:
+    that:
+      - sa_active_config_dsn | length > 0
+      - sa_active_config_dsn.startswith(sa_config_gdg_base)
+    fail_msg: >-
+      Could not read the active configuration data set from F {{ sa_proc }},ACF STATUS,
+      or it is not a generation of {{ sa_config_gdg_base }}.
+      Got '{{ sa_active_config_dsn }}'.
+    success_msg: "Active configuration: {{ sa_active_config_dsn }} (token {{ sa_active_config_token }})"

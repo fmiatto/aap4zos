@@ -1,0 +1,48 @@
+---
+# =============================================================================
+# manifest.yml - Input: sa_manifest_dsn (a PDS/PDSE).
+#   Sets:
+#     sa_manifest       {member: "<cksum> <bytes>", ...}
+#     sa_manifest_text  one "MEMBER   CKSUM BYTES" line per member
+#   Uses ZOAU mls/dcat (installed with ibm_zos_core) and the z/OS UNIX cksum.
+# =============================================================================
+- name: "SA POLICY | Manifest - Checksum every member of {{ sa_manifest_dsn }}"
+  ansible.builtin.shell: |
+    members=$(mls "{{ sa_manifest_dsn }}" 2>/dev/null || true)
+    for m in $members; do
+      set -- $(dcat "{{ sa_manifest_dsn }}($m)" | cksum)
+      printf '%-8s %s %s\n' "$m" "$1" "$2"
+    done
+  register: sa_manifest_raw
+  changed_when: false
+
+- name: "SA POLICY | Manifest - Parse {{ sa_manifest_dsn }}"
+  ansible.builtin.set_fact:
+    sa_manifest: >-
+      {%- set out = {} -%}
+      {%- for line in sa_manifest_raw.stdout_lines if line.split() | length == 3 -%}
+      {%-   set f = line.split() -%}
+      {%-   set _ = out.update({f[0]: f[1] ~ ' ' ~ f[2]}) -%}
+      {%- endfor -%}
+      {{ out }}
+    sa_manifest_text: "{{ sa_manifest_raw.stdout_lines | select('search', '[^ ]') | join('\n') }}"
+
+- name: "SA POLICY | Manifest - {{ sa_manifest_dsn }} has {{ sa_manifest | length }} members"
+  ansible.builtin.debug:
+    msg: "{{ sa_manifest_dsn }}: {{ sa_manifest | length }} members"
+
+# Optional: sa_manifest_expect (a manifest dict) makes this a verification.
+- name: "SA POLICY | Manifest - Verify {{ sa_manifest_dsn }} matches its source"
+  ansible.builtin.assert:
+    that:
+      - sa_manifest == sa_manifest_expect
+      - sa_manifest | length > 0
+    fail_msg: >-
+      {{ sa_manifest_dsn }} does not match its source.
+      Missing: {{ sa_manifest_expect.keys() | difference(sa_manifest.keys()) }}.
+      Extra: {{ sa_manifest.keys() | difference(sa_manifest_expect.keys()) }}.
+      Different: {{ sa_manifest_expect | dict2items
+                    | rejectattr('value', 'in', sa_manifest.values()) | map(attribute='key')
+                    | intersect(sa_manifest.keys()) }}.
+    success_msg: "{{ sa_manifest_dsn }}: all {{ sa_manifest | length }} members match"
+  when: sa_manifest_expect is defined

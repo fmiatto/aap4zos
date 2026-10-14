@@ -1,0 +1,36 @@
+---
+# =============================================================================
+# jcl_guard.yml - Input: sa_jcl_text (rendered JCL).
+#   Refuse JCL that names the production PDB (by data set or dialog name) or
+#   the production build-output GDG on any non-comment line, and JCL lines
+#   that would be truncated past column 72.
+#   P6 only: in production mode (sa_production_mode, which naming.yml sets
+#   only after the typed sa_confirm_production) production references are
+#   allowed.  The column check always applies.
+# =============================================================================
+- name: "SA POLICY | JCL guard - Check rendered JCL"
+  ansible.builtin.set_fact:
+    sa_jcl_violations: >-
+      {{ [] if sa_production_mode | default(false) | bool
+         else sa_jcl_live_lines | select('search', sa_prod_regex) | list }}
+    sa_jcl_long_lines: >-
+      {{ sa_jcl_text.splitlines() | select('match', '^.{73,}') | list }}
+  vars:
+    sa_jcl_live_lines: "{{ sa_jcl_text.splitlines() | reject('match', '^//[*]') | list }}"
+    sa_prod_regex: >-
+      (^|[^A-Z0-9@#$.])({{ sa_pdb_dsn | regex_escape }}|{{ sa_pdb_name | regex_escape }})([^A-Z0-9@#$.]|$)|{{ sa_config_gdg_base | regex_escape }}
+
+- name: "SA POLICY | JCL guard - PRODUCTION MODE: production references allowed"
+  ansible.builtin.debug:
+    msg: "P6 production mode ({{ sa_confirm_production }}): this job may address {{ sa_pdb_dsn }} / {{ sa_config_gdg_base }}."
+  when: sa_production_mode | default(false) | bool
+
+- name: "SA POLICY | JCL guard - Refuse JCL that touches production"
+  ansible.builtin.assert:
+    that:
+      - sa_jcl_violations | length == 0
+      - sa_jcl_long_lines | length == 0
+    fail_msg: >-
+      Rendered JCL rejected. Production references: {{ sa_jcl_violations }}.
+      Lines past column 72: {{ sa_jcl_long_lines }}.
+    quiet: true

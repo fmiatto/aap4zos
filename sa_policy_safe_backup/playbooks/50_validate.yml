@@ -1,0 +1,304 @@
+---
+# =============================================================================
+# Playbook : 50_validate.yml                                     Phase P5
+# Purpose  : Compare the STAGING build output with the ACTIVE configuration.
+#              - New / removed / changed members (by cksum).
+#              - Every new APL must appear in the staging output.
+#              - Every difference is put in one group:
+#                  build stamp only  differs only in lines every build
+#                                    rewrites (sa_validate_stamp_regex)
+#                  AM configuration  binary members rebuilt by every build
+#                                    (sa_validate_am_regex)
+#                  stale in active   removed members the active ACFZ999 does
+#                                    not include (left over from older builds)
+#                  new entries       members that mention the new APG / APLs
+#                  explained         listed in sa_validate_explanations
+#                  to explain        everything else (fails with
+#                                    sa_validate_strict=true)
+#              - Diffs (stamp lines removed) of every text member that
+#                changed for a reason other than the build stamp.
+#            The console shows a summary.  The full report is stored in
+#            <HLQ>.SAPDB.WORK(P5REPORT) and published as AAP job artifacts:
+#              GET /api/v2/jobs/<id>/  ->  .artifacts.sa_validation
+# Survey   :
+#   sa_proc            - SA z/OS agent PROC name (default: AUTOPROC)
+#   sa_validate_strict - true to fail on unexplained changes (default: false)
+# =============================================================================
+- name: SA POLICY | P5 Validate - Staging output vs active configuration
+  hosts: zos_host
+  environment: "{{ environment_vars }}"
+  gather_facts: false
+  vars_files:
+    - ../vars/sa_env.yml
+    - ../vars/new_apl.yml
+
+  tasks:
+
+    - name: "SA POLICY | Derive data set names"
+      ansible.builtin.include_role:
+        name: "{{ playbook_dir }}/../roles/sa_policy_common"
+        tasks_from: naming
+
+    - name: "SA POLICY | Read active configuration"
+      ansible.builtin.include_role:
+        name: "{{ playbook_dir }}/../roles/sa_policy_common"
+        tasks_from: active_config
+
+    - name: "SA POLICY | Validate and render the text file"
+      ansible.builtin.include_role:
+        name: "{{ playbook_dir }}/../roles/sa_policy_common"
+        tasks_from: render
+
+    # =========================================================================
+    # Member-level comparison
+    # =========================================================================
+    - name: "SA POLICY | P5 - Manifest of {{ sa_active_config_dsn }}"
+      ansible.builtin.include_role:
+        name: "{{ playbook_dir }}/../roles/sa_policy_common"
+        tasks_from: manifest
+      vars:
+        sa_manifest_dsn: "{{ sa_active_config_dsn }}"
+
+    - name: "SA POLICY | P5 - Keep active manifest"
+      ansible.builtin.set_fact:
+        sa_active_manifest: "{{ sa_manifest }}"
+
+    - name: "SA POLICY | P5 - Manifest of {{ sa_staging_dsn }}"
+      ansible.builtin.include_role:
+        name: "{{ playbook_dir }}/../roles/sa_policy_common"
+        tasks_from: manifest
+      vars:
+        sa_manifest_dsn: "{{ sa_staging_dsn }}"
+
+    - name: "SA POLICY | P5 - Keep staging manifest"
+      ansible.builtin.set_fact:
+        sa_staging_manifest: "{{ sa_manifest }}"
+
+    - name: "SA POLICY | P5 - Stop if staging is empty"
+      ansible.builtin.assert:
+        that: sa_staging_manifest | length > 0
+        fail_msg: "{{ sa_staging_dsn }} is empty or missing. Run 40_build_staging.yml first."
+        quiet: true
+
+    - name: "SA POLICY | P5 - Classify members"
+      ansible.builtin.set_fact:
+        sa_members_new: "{{ sa_staging_manifest.keys() | difference(sa_active_manifest.keys()) | sort }}"
+        sa_members_removed: "{{ sa_active_manifest.keys() | difference(sa_staging_manifest.keys()) | sort }}"
+        sa_members_changed: >-
+          {%- set out = [] -%}
+          {%- for m, v in sa_staging_manifest.items() if m in sa_active_manifest and sa_active_manifest[m] != v -%}
+          {%-   set _ = out.append(m) -%}
+          {%- endfor -%}
+          {{ out | sort }}
+
+    - name: "SA POLICY | P5 - Split off Automation Manager members"
+      ansible.builtin.set_fact:
+        sa_members_am: "{{ (sa_members_changed + sa_members_new) | select('match', sa_validate_am_regex) | list }}"
+        sa_members_text_changed: "{{ sa_members_changed | reject('match', sa_validate_am_regex) | list }}"
+
+    # =========================================================================
+    # One pass on z/OS:
+    #   "R <side> <member> <name>"  member mentions a new entry name
+    #   "STAMP <member>"            changed text member, equal without stamp lines
+    #   "INC <member>"              member included by the active ACFZ999
+    # =========================================================================
+    - name: "SA POLICY | P5 - Compare members on z/OS"
+      ansible.builtin.shell: |
+        re='{{ sa_validate_stamp_regex }}'
+        t=/tmp/sapolicy.$$
+        for side in "S {{ sa_staging_dsn }}" "A {{ sa_active_config_dsn }}"; do
+          set -- $side
+          for m in $(mls "$2" 2>/dev/null); do
+            dcat "$2($m)" > $t
+            for n in {{ sa_new_names | join(' ') }}; do
+              grep -F -q "$n" $t && echo "R $1 $m $n"
+            done
+          done
+        done
+        for m in {{ sa_members_text_changed | join(' ') }}; do
+          a=$(dcat "{{ sa_active_config_dsn }}($m)" | grep -v -E "$re" | cksum)
+          s=$(dcat "{{ sa_staging_dsn }}($m)" | grep -v -E "$re" | cksum)
+          [ "$a" = "$s" ] && echo "STAMP $m"
+        done
+        dcat "{{ sa_active_config_dsn }}(ACFZ999)" 2>/dev/null | awk '$1 == "%INCLUDE" { print "INC " $2 }'
+        rm -f $t
+        exit 0
+      register: sa_compare_raw
+      changed_when: false
+
+    - name: "SA POLICY | P5 - Group the differences"
+      vars:
+        _explained: "{{ (sa_validate_explanations | default({}, true)).keys() | list }}"
+      ansible.builtin.set_fact:
+        sa_refs_staging: >-
+          {%- set out = {} -%}
+          {%- for l in sa_compare_raw.stdout_lines -%}
+          {%-   set f = l.split() -%}
+          {%-   if f | length == 4 and f[0] == 'R' and f[1] == 'S' -%}
+          {%-     set _ = out.update({f[2]: (out[f[2]] | default([])) + [f[3]]}) -%}
+          {%-   endif -%}
+          {%- endfor -%}
+          {{ out }}
+        sa_refs_active: >-
+          {%- set out = [] -%}
+          {%- for l in sa_compare_raw.stdout_lines -%}
+          {%-   set f = l.split() -%}
+          {%-   if f | length == 4 and f[0] == 'R' and f[1] == 'A' and f[2] not in out -%}
+          {%-     set _ = out.append(f[2]) -%}
+          {%-   endif -%}
+          {%- endfor -%}
+          {{ out }}
+        sa_members_stamp_only: >-
+          {{ sa_compare_raw.stdout_lines | select('match', '^STAMP ') | map('regex_replace', '^STAMP ', '') | map('trim') | list }}
+        sa_members_stale: >-
+          {{ sa_members_removed
+             | reject('in', sa_compare_raw.stdout_lines | select('match', '^INC ') | map('regex_replace', '^INC ', '') | map('trim') | list)
+             | list }}
+        sa_members_explained_by_operator: >-
+          {{ (sa_members_new + sa_members_changed + sa_members_removed) | select('in', _explained) | list }}
+
+    - name: "SA POLICY | P5 - Evaluate expected and unexplained changes"
+      vars:
+        _expected: >-
+          {{ sa_members_stamp_only + sa_members_am + sa_members_stale
+             + (sa_refs_staging.keys() | list) + sa_members_explained_by_operator }}
+      ansible.builtin.set_fact:
+        sa_apls_missing: >-
+          {{ sa_new_policy.apls | map(attribute='name')
+             | difference(sa_refs_staging.values() | list | flatten | unique) }}
+        sa_members_mentioning: >-
+          {{ (sa_members_new + sa_members_changed) | select('in', sa_refs_staging.keys() | list) | list }}
+        sa_members_unexplained: >-
+          {{ (sa_members_new + sa_members_changed + sa_members_removed)
+             | reject('in', _expected) | list }}
+        sa_members_to_diff: >-
+          {{ sa_members_text_changed | reject('in', sa_members_stamp_only) | list }}
+
+    # =========================================================================
+    # Diffs without the stamp lines; non-printable bytes removed
+    # =========================================================================
+    - name: "SA POLICY | P5 - Diff the members that really changed"
+      ansible.builtin.shell: |
+        re='{{ sa_validate_stamp_regex }}'
+        t=/tmp/sapolicy.$$
+        mkdir -p "$t"
+        for m in {{ sa_members_to_diff | join(' ') }}; do
+          echo "=== $m"
+          dcat "{{ sa_active_config_dsn }}($m)" | grep -v -E "$re" | sed 's/ *$//' > "$t/a"
+          dcat "{{ sa_staging_dsn }}($m)" | grep -v -E "$re" | sed 's/ *$//' > "$t/s"
+          diff "$t/a" "$t/s" | head -{{ sa_validate_diff_lines }}
+        done | tr -cd '[:alnum:][:space:][:punct:]'
+        rm -rf "$t"
+        exit 0
+      register: sa_diffs
+      changed_when: false
+      when: sa_members_to_diff | length > 0
+
+    # =========================================================================
+    # Report
+    # =========================================================================
+    - name: "SA POLICY | P5 - Build report"
+      ansible.builtin.set_fact:
+        sa_validation:
+          active_config: "{{ sa_active_config_dsn }}"
+          staging: "{{ sa_staging_dsn }}"
+          members_active: "{{ sa_active_manifest | length }}"
+          members_staging: "{{ sa_staging_manifest | length }}"
+          members_new: "{{ sa_members_new }}"
+          members_removed: "{{ sa_members_removed }}"
+          members_changed: "{{ sa_members_changed }}"
+          groups:
+            build_stamp_only: "{{ sa_members_stamp_only }}"
+            am_configuration: "{{ sa_members_am }}"
+            stale_in_active: "{{ sa_members_stale }}"
+            mention_new_entries: "{{ sa_refs_staging }}"
+            explained: "{{ sa_validate_explanations | default({}, true) }}"
+            to_explain: "{{ sa_members_unexplained }}"
+          active_members_already_referencing: "{{ sa_refs_active }}"
+          apls_missing_from_build: "{{ sa_apls_missing }}"
+          diffs: "{{ sa_diffs.stdout_lines | default([]) }}"
+          exit_criteria:
+            new_apls_in_build: "{{ sa_apls_missing | length == 0 }}"
+            only_expected_changes: "{{ sa_members_unexplained | length == 0 }}"
+
+    # A list keeps this order (debug sorts dict keys).  The diffs and the
+    # full member lists are in P5REPORT and the artifact; -v prints them too.
+    - name: "SA POLICY | P5 - Show summary"
+      ansible.builtin.debug:
+        msg:
+          - "Active  {{ sa_active_config_dsn }}: {{ sa_active_manifest | length }} members"
+          - "Staging {{ sa_staging_dsn }}: {{ sa_staging_manifest | length }} members"
+          - "New {{ sa_members_new | length }}, removed {{ sa_members_removed | length }}, changed {{ sa_members_changed | length }}"
+          - "  build stamp only    : {{ sa_members_stamp_only | length }}"
+          - "  AM configuration    : {{ sa_members_am | join(' ') or '-' }}"
+          - "  stale in active     : {{ sa_members_stale | join(' ') or '-' }}"
+          - "  mention new entries : {{ sa_members_mentioning | join(' ') or '-' }}"
+          - "  explained           : {{ sa_members_explained_by_operator | join(' ') or '-' }}"
+          - "  TO EXPLAIN          : {{ sa_members_unexplained | join(' ') or '-' }}"
+          - "New APLs missing from the build: {{ sa_apls_missing | join(' ') or '-' }}"
+          - "Diffs of {{ sa_members_to_diff | join(' ') or '-' }}: {{ sa_work_pds }}(P5REPORT)"
+
+    - name: "SA POLICY | P5 - Index diffs by member"
+      ansible.builtin.set_fact:
+        sa_diff_by_member: >-
+          {%- set out = {} -%}
+          {%- set cur = {'m': ''} -%}
+          {%- for l in sa_diffs.stdout_lines | default([]) -%}
+          {%-   if l.startswith('=== ') -%}
+          {%-     set _ = cur.update({'m': l[4:] | trim}) -%}
+          {%-     set _ = out.update({cur.m: []}) -%}
+          {%-   elif cur.m -%}
+          {%-     set _ = out[cur.m].append(l) -%}
+          {%-   endif -%}
+          {%- endfor -%}
+          {{ out }}
+
+    # Only the members to explain (all diffs with -v).
+    - name: "SA POLICY | P5 - Show diffs of members to explain"
+      ansible.builtin.debug:
+        msg: >-
+          {{ sa_diff_by_member if ansible_verbosity | int >= 1 else
+             dict(sa_diff_by_member | dict2items | selectattr('key', 'in', sa_members_unexplained)
+                  | map(attribute='key') | zip(sa_diff_by_member | dict2items
+                  | selectattr('key', 'in', sa_members_unexplained) | map(attribute='value'))) }}
+      when: sa_members_unexplained | select('in', sa_diff_by_member.keys() | list) | list | length > 0
+            or ansible_verbosity | int >= 1
+
+    - name: "SA POLICY | P5 - Store report in {{ sa_work_pds }}(P5REPORT)"
+      ibm.ibm_zos_core.zos_copy:
+        # The work PDS is FB 80: cut longer lines
+        content: "{{ sa_validation | to_nice_yaml(width=78, indent=2) | regex_replace('(?m)(?<=^.{80}).+$', '') }}"
+        dest: "{{ sa_work_pds }}(P5REPORT)"
+        replace: true
+
+    # =========================================================================
+    # Publish the validation report:
+    #   GET /api/v2/jobs/<id>/  ->  .artifacts.sa_validation
+    # The diffs and the long member lists (changed, build stamp only) are
+    # replaced by counts; they are in P5REPORT.
+    # =========================================================================
+    - name: "SA POLICY | P5 - Publish validation report as AAP job artifact"
+      ansible.builtin.set_stats:
+        data:
+          sa_validation: >-
+            {{ sa_validation | combine({
+                 'members_changed': sa_members_changed | length,
+                 'diffs': 'see ' ~ sa_work_pds ~ '(P5REPORT)',
+                 'groups': {'build_stamp_only': sa_members_stamp_only | length}
+               }, recursive=true) }}
+
+    - name: "SA POLICY | P5 - Every new APL must be in the build output"
+      ansible.builtin.assert:
+        that: sa_apls_missing | length == 0
+        fail_msg: "Not found in {{ sa_staging_dsn }}: {{ sa_apls_missing }}"
+        success_msg: "All new APLs appear in {{ sa_staging_dsn }}."
+
+    - name: "SA POLICY | P5 - Changes that must be explained"
+      ansible.builtin.assert:
+        that: sa_members_unexplained | length == 0
+        fail_msg: >-
+          {{ sa_members_unexplained | length }} member(s) changed for no known reason:
+          {{ sa_members_unexplained | join(' ') }}.  Read their diffs, then add each one
+          with its reason to sa_validate_explanations (vars/new_apl.yml) before P6.
+        success_msg: "Every change is explained."
+      ignore_errors: "{{ not (sa_validate_strict | bool) }}"

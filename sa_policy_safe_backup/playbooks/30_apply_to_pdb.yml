@@ -1,0 +1,222 @@
+---
+# =============================================================================
+# Playbook : 30_apply_to_pdb.yml                                 Phase P3
+# Purpose  : Apply the rendered text file to the CLONED PDB in batch.
+#              1. Render the text file (same template as P2) and the job from
+#                 templates/textupd.jcl.j2 using sa_textupd from the P0 spike.
+#              2. Refuse JCL that names the production PDB or build output.
+#              3. Store both in <HLQ>.SAPDB.WORK, submit, wait, and fail on any
+#                 RC above sa_textupd.max_rc or any flagged message.
+#            The production PDB is never referenced, except in P6 production
+#            mode (sa_target=production + sa_confirm_production): then the
+#            same job updates the production PDB, after production_gate.yml
+#            has checked that the newest Backup A matches it.
+#            Results are published as AAP job artifacts:
+#              GET /api/v2/jobs/<id>/  ->  .artifacts.sa_apply
+# Survey   :
+#   sa_proc               - SA z/OS agent PROC name (default: AUTOPROC)
+#   sa_target             - P6 only: production
+#   sa_confirm_production - P6 only: "ACTIVATE <production PDB DSN>"
+# Rollback : clone: 90_rollback.yml rollback_action=reclone (re-clone from Backup A).
+#            production: rollback_action=restore_production_pdb.
+# =============================================================================
+- name: SA POLICY | P3 Apply - Update the CLONED PDB with the DB2 DBA1 APLs
+  hosts: zos_host
+  environment: "{{ environment_vars }}"
+  gather_facts: false
+  vars_files:
+    - ../vars/sa_env.yml
+    - ../vars/new_apl.yml
+  vars:
+    sa_jobname: "{{ sa_job.prefix | default('SAP') }}TXUPD"
+    sa_production_capable: true     # accepts P6 sa_target=production
+
+  tasks:
+
+    # Names first: sa_textupd / sa_build reference them, and reading any key
+    # (e.g. .verified) templates the whole dict.
+    - name: "SA POLICY | Derive data set names"
+      ansible.builtin.include_role:
+        name: "{{ playbook_dir }}/../roles/sa_policy_common"
+        tasks_from: naming
+
+    - name: "SA POLICY | P3 - Stop until the batch mechanism is confirmed"
+      ansible.builtin.assert:
+        that:
+          - sa_textupd.verified | bool
+          - sa_textupd.systsin | length > 0
+        fail_msg: >-
+          sa_textupd is not confirmed yet. Run 00_discover.yml, take the text-update
+          batch command and DDs from the spike output (SINGSAMP INGEB* / SINGISKL),
+          set sa_textupd.systsin and sa_textupd.dd in vars/sa_env.yml (or as extra
+          vars) pointing at the clone, then set sa_textupd.verified=true.
+
+    - name: "SA POLICY | P6 - Backup A must match the production PDB"
+      ansible.builtin.include_role:
+        name: "{{ playbook_dir }}/../roles/sa_policy_common"
+        tasks_from: production_gate
+      when: sa_production_mode | default(false) | bool
+
+    - name: "SA POLICY | P3 - Check the clone exists"
+      ansible.builtin.include_role:
+        name: "{{ playbook_dir }}/../roles/sa_policy_common"
+        tasks_from: dataset_exists
+      vars:
+        sa_dsn: "{{ sa_clone_dsn }}"
+
+    - name: "SA POLICY | P3 - Stop if there is no clone"
+      ansible.builtin.assert:
+        that: sa_dsn_exists | bool
+        fail_msg: "{{ sa_clone_dsn }} does not exist. Run 10_backup_clone.yml first."
+        quiet: true
+
+    - name: "SA POLICY | Stop if the clone is held exclusively"
+      ansible.builtin.include_role:
+        name: "{{ playbook_dir }}/../roles/sa_policy_common"
+        tasks_from: enq_check
+      vars:
+        sa_enq_dsn: "{{ sa_clone_dsn }}"
+
+    # =========================================================================
+    # Render the text file and the job; guard the JCL
+    # =========================================================================
+    - name: "SA POLICY | Validate and render the text file"
+      ansible.builtin.include_role:
+        name: "{{ playbook_dir }}/../roles/sa_policy_common"
+        tasks_from: render
+
+    - name: "SA POLICY | P3 - Render templates/textupd.jcl.j2"
+      ansible.builtin.set_fact:
+        sa_textupd_jcl: "{{ lookup('ansible.builtin.template', playbook_dir ~ '/../templates/textupd.jcl.j2') | trim }}"
+
+    - name: "SA POLICY | JCL guard"
+      ansible.builtin.include_role:
+        name: "{{ playbook_dir }}/../roles/sa_policy_common"
+        tasks_from: jcl_guard
+      vars:
+        sa_jcl_text: "{{ sa_textupd_jcl }}"
+
+    - name: "SA POLICY | P3 - Show the job"
+      ansible.builtin.debug:
+        msg: "{{ sa_textupd_jcl.splitlines() }}"
+
+    # =========================================================================
+    # Store text file and JCL in the work PDS, then run the update
+    # =========================================================================
+    - name: "SA POLICY | P3 - Ensure work PDS {{ sa_work_pds }}"
+      ibm.ibm_zos_core.zos_data_set:
+        name: "{{ sa_work_pds }}"
+        type: pds
+        record_format: fb
+        record_length: 80
+        space_primary: 5
+        space_secondary: 5
+        space_type: cyl
+        directory_blocks: 20
+        state: present
+
+    - name: "SA POLICY | P3 - Store {{ item.member }} in {{ sa_work_pds }}"
+      ibm.ibm_zos_core.zos_copy:
+        content: "{{ item.content }}"
+        dest: "{{ sa_work_pds }}({{ item.member }})"
+        replace: true
+      loop:
+        - { member: "{{ sa_new_policy.textfile_member }}", content: "{{ sa_textfile }}" }
+        - { member: TEXTUPD, content: "{{ sa_textupd_jcl }}" }
+      loop_control:
+        label: "{{ sa_work_pds }}({{ item.member }})"
+
+    # AOFFBFL1 reads PDBUPD by data set name (LMINIT), losing any member
+    # name, so the text file is also copied to a sequential data set.
+    - name: "SA POLICY | P3 - Recreate source data set {{ sa_textupd.source_dsn }}"
+      ibm.ibm_zos_core.zos_data_set:
+        name: "{{ sa_textupd.source_dsn }}"
+        type: seq
+        record_format: fb
+        record_length: 80
+        space_primary: 1
+        space_secondary: 5
+        space_type: cyl
+        replace: true
+        state: present
+      when: sa_textupd.source_dsn | default('') | length > 0
+
+    - name: "SA POLICY | P3 - Store the text file in {{ sa_textupd.source_dsn }}"
+      ibm.ibm_zos_core.zos_copy:
+        content: "{{ sa_textfile }}"
+        dest: "{{ sa_textupd.source_dsn }}"
+        replace: true
+      when: sa_textupd.source_dsn | default('') | length > 0
+
+    # PDBRPT is DISP=OLD (as in SINGSAMP(INGEBFLT)), so the report data set
+    # must exist; recreate it empty so each run shows only its own report.
+    # AOFFBFL1 opens it with LMINIT ENQ(SHRW), which ISPF only allows for a
+    # partitioned data set (JOB00498), so it is a PDS and SA picks the member.
+    - name: "SA POLICY | P3 - Recreate report data set {{ sa_textupd.report_dsn }}"
+      ibm.ibm_zos_core.zos_data_set:
+        name: "{{ sa_textupd.report_dsn }}"
+        type: pds
+        record_format: fb
+        record_length: 133
+        space_primary: 1
+        space_secondary: 5
+        space_type: cyl
+        directory_blocks: 10
+        replace: true
+        state: present
+      when: sa_textupd.report_dsn | default('') | length > 0
+
+    - name: "SA POLICY | P3 - Run the text-file update"
+      block:
+        - name: "SA POLICY | P3 - Run the text-file update"
+          ansible.builtin.include_role:
+            name: "{{ playbook_dir }}/../roles/sa_policy_common"
+            tasks_from: run_job
+          vars:
+            sa_job_dsn: "{{ sa_work_pds }}(TEXTUPD)"
+            sa_job_label: "P3 text update"
+            sa_job_max_rc: "{{ sa_textupd.max_rc }}"
+      always:
+        - name: "SA POLICY | P3 - Read update report {{ sa_textupd.report_dsn }}"
+          ansible.builtin.shell: |
+            dsn="{{ sa_textupd.report_dsn }}"
+            tsocmd "LISTDS '$dsn' MEMBERS" 2>/dev/null | sed '1,/--MEMBERS--/d' |
+            while read mem rest; do
+              echo "=== $dsn($mem)"
+              cat "//'$dsn($mem)'"
+            done
+          register: sa_textupd_report
+          changed_when: false
+          failed_when: false
+          when: sa_textupd.report_dsn | default('') | length > 0
+
+        - name: "SA POLICY | P3 - Show update report"
+          ansible.builtin.debug:
+            msg: "{{ (sa_textupd_report.stdout_lines | default([])) or ['(report is empty)'] }}"
+          when: sa_textupd.report_dsn | default('') | length > 0
+
+    - name: "SA POLICY | P3 - Checkpoint"
+      ansible.builtin.debug:
+        msg:
+          - "{{ 'PRODUCTION PDB' if sa_production_mode | default(false) | bool else 'Clone' }} {{ sa_clone_dsn }} updated by job {{ sa_job_id }} (CC {{ sa_job_rc }})."
+          - "New entries: APG {{ sa_new_policy.apg.name }}, APL {{ sa_new_policy.apls | map(attribute='name') | join(', ') }}"
+          - "{{ 'Next: 40_build_staging.yml with the same -e sa_target / sa_confirm_production.  Rollback: 90_rollback.yml rollback_action=restore_production_pdb'
+               if sa_production_mode | default(false) | bool
+               else 'Next: 40_build_staging.yml.  Rollback: 90_rollback.yml rollback_action=reclone' }}"
+
+    # =========================================================================
+    # Publish the update record:
+    #   GET /api/v2/jobs/<id>/  ->  .artifacts.sa_apply
+    # =========================================================================
+    - name: "SA POLICY | P3 - Publish update record as AAP job artifact"
+      ansible.builtin.set_stats:
+        data:
+          sa_apply:
+            target: "{{ 'production' if sa_production_mode | default(false) | bool else 'clone' }}"
+            clone: "{{ sa_clone_dsn }}"
+            backup_a: "{{ sa_gate_backup | default('') }}"
+            textfile: "{{ sa_work_pds }}({{ sa_new_policy.textfile_member }})"
+            job_id: "{{ sa_job_id }}"
+            ret_code: "{{ sa_job_rc_msg }} {{ sa_job_rc }}"
+            new_entries: "{{ [sa_new_policy.apg.name] + (sa_new_policy.apls | map(attribute='name') | list) }}"
+            flagged_messages: "{{ sa_job_messages }}"

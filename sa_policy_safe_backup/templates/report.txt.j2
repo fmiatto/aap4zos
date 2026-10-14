@@ -1,0 +1,44 @@
+{#
+  P0 - Discovery summary. Written by playbooks/00_discover.yml to
+  sa_policy/output/discover_<stamp>/report.txt on the control node.
+#}
+SA POLICY - P0 discovery {{ r.stamp }} on {{ r.system }}
+======================================================================
+
+Active configuration : {{ r.active_config }}
+Clone                : {{ r.clone }}
+DB2 jobs running     : {{ r.db2_running | join(', ') or 'none' }}
+DB2 jobs not running : {{ r.db2_missing | join(', ') or 'none' }}
+
+NEXT ACTIONS
+------------
+{% for a in r.actions %}
+{{ loop.index }}. {{ a | wordwrap(68, break_long_words=false, break_on_hyphens=false) | indent(3) }}
+{% endfor %}
+
+SPIKE MEMBERS
+-------------
+Full text of every member is in spike_full.txt.
+{% for m in r.spike_index %}
+
+--- {{ m.member }}{{ '  (NOT FOUND)' if not m.found else '' }}
+{% if m.found %}
+    Title    : {{ m.title or '-' }}
+    Lines    : {{ m.lines }}
+    Programs : {{ m.pgms | join(', ') or '-' }}
+    DDs      : {{ m.dds | join(', ') or '-' }}
+{%   set extra = m.ispstart | reject('in', m.systsin | map('trim') | list) | list %}
+{%   if extra %}
+    ISPSTART :
+{%     for l in extra %}
+      {{ l }}
+{%     endfor %}
+{%   endif %}
+{%   if m.systsin %}
+    SYSTSIN  :
+{%     for l in m.systsin %}
+      {{ l }}
+{%     endfor %}
+{%   endif %}
+{% endif %}
+{% endfor %}

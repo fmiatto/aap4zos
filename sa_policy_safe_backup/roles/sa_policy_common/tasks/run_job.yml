@@ -1,0 +1,109 @@
+---
+# =============================================================================
+# run_job.yml - Submit JCL stored in a data set member, wait for it, collect
+#               the output and fail on an unexpected RC or flagged messages.
+#   Input : sa_job_dsn     DSN(MEMBER) holding the JCL
+#           sa_job_label   short label for task names (e.g. "P3 text update")
+#           sa_job_max_rc  highest acceptable completion code
+#           sa_job_dds     optional: DDs to read with pjdd when
+#                          zos_job_output returns none
+#                          (default ISPLOG SYSTSPRT SYSPRINT SYSOUT)
+#   Sets  : sa_job_id, sa_job_rc_msg, sa_job_rc, sa_job_messages,
+#           sa_job_dd_output {ddname: [lines]} (JES DDs excluded)
+# =============================================================================
+- name: "SA POLICY | {{ sa_job_label }} - Submit {{ sa_job_dsn }}"
+  ibm.ibm_zos_core.zos_job_submit:
+    src: "{{ sa_job_dsn }}"
+    remote_src: true
+    wait_time: 0                  # submit only; the loop below waits
+  register: sa_job_submit
+
+- name: "SA POLICY | {{ sa_job_label }} - Record job ID"
+  ansible.builtin.set_fact:
+    sa_job_id: "{{ sa_job_submit.jobs[0].job_id }}"
+
+- name: "SA POLICY | {{ sa_job_label }} - Wait for {{ sa_job_id }} to complete"
+  ibm.ibm_zos_core.zos_job_output:
+    job_id: "{{ sa_job_id }}"
+  register: sa_job_out
+  until: >-
+    (sa_job_out.jobs | default([]) | length > 0) and
+    ((sa_job_out.jobs[0].ret_code | default({}, true)).msg | default('AC', true))
+      not in ['AC', '?', 'INPUT', 'HOLD']
+  retries: "{{ sa_job.poll_retries }}"
+  delay: "{{ sa_job.poll_delay }}"
+
+# On some hosts zos_job_output returns no dds at all (seen on LTE1), while
+# ZOAU pjdd can still read the spool.  pjdd cannot list a job's DDs here
+# (ddls is not authorized), so it reads the DDs named in sa_job_dds; a DD
+# that is not in the spool prints nothing.  Column 1 is the ASA control
+# character and is dropped; tr removes bytes that are not valid UTF-8.
+- name: "SA POLICY | {{ sa_job_label }} - Read {{ sa_job_id }} spool with pjdd"
+  ansible.builtin.shell: |
+    for dd in {{ sa_job_dds | default(['ISPLOG', 'SYSTSPRT', 'SYSPRINT', 'SYSOUT']) | join(' ') }}; do
+      echo "#@DD $dd"
+      pjdd {{ sa_job_id }} $dd 2>/dev/null | cut -c2- | sed 's/ *$//'
+    done | tr -cd '[:alnum:][:space:][:punct:]'
+  register: sa_job_pjdd
+  changed_when: false
+  failed_when: false
+
+- name: "SA POLICY | {{ sa_job_label }} - Collect result of {{ sa_job_id }}"
+  ansible.builtin.set_fact:
+    sa_job_rc_msg: "{{ sa_job_out.jobs[0].ret_code.msg | default('') }}"
+    sa_job_rc: "{{ -1 if sa_job_out.jobs[0].ret_code.code is none else sa_job_out.jobs[0].ret_code.code | int }}"
+    sa_job_dd_output: >-
+      {%- set out = {} -%}
+      {%- for dd in sa_job_out.jobs[0].dds | default([]) if not dd.dd_name.startswith('JES') -%}
+      {%-   set _ = out.update({dd.dd_name: (out[dd.dd_name] | default([])) + (dd.content | default([]))}) -%}
+      {%- endfor -%}
+      {%- set cur = {'dd': ''} -%}
+      {%- set pj = {} -%}
+      {%- for line in sa_job_pjdd.stdout_lines | default([]) -%}
+      {%-   if line.startswith('#@DD ') -%}
+      {%-     set _ = cur.update({'dd': line[5:] | trim}) -%}
+      {%-   elif cur.dd -%}
+      {%-     set _ = pj.update({cur.dd: (pj[cur.dd] | default([])) + [line]}) -%}
+      {%-   endif -%}
+      {%- endfor -%}
+      {%- for dd, lines in pj.items() if dd not in out and lines | select | list | length > 0 -%}
+      {%-   set _ = out.update({dd: lines}) -%}
+      {%- endfor -%}
+      {{ out }}
+
+- name: "SA POLICY | {{ sa_job_label }} - Scan output for warning and error messages"
+  ansible.builtin.set_fact:
+    sa_job_messages: >-
+      {{ sa_job_dd_output.values() | list | flatten
+         | select('search', sa_fail_message_regex) | list }}
+
+# Two tasks so the return code is printed before the (long) spool output;
+# debug sorts dict keys, which put ret_code last.
+- name: "SA POLICY | {{ sa_job_label }} - Show {{ sa_job_id }} return code"
+  ansible.builtin.debug:
+    msg: >-
+      {{ [sa_job_label ~ ' job ' ~ sa_job_id ~ ' ended ' ~ sa_job_rc_msg ~ ' ' ~ sa_job_rc
+          ~ ' (max RC ' ~ sa_job_max_rc ~ '), '
+          ~ (sa_job_messages | length) ~ ' flagged message(s)']
+         + sa_job_messages }}
+
+# The full spool (hundreds of lines for a build) only when the job failed
+# the checks below, or when the run uses -v.
+- name: "SA POLICY | {{ sa_job_label }} - Show {{ sa_job_id }} output"
+  ansible.builtin.debug:
+    msg: "{{ sa_job_dd_output }}"
+  when: >-
+    sa_job_rc_msg != 'CC' or sa_job_rc | int > sa_job_max_rc | int
+    or sa_job_messages | length > 0 or ansible_verbosity | int >= 1
+
+- name: "SA POLICY | {{ sa_job_label }} - Check completion of {{ sa_job_id }}"
+  ansible.builtin.assert:
+    that:
+      - sa_job_rc_msg == 'CC'
+      - sa_job_rc | int <= sa_job_max_rc | int
+      - sa_job_messages | length == 0
+    fail_msg: >-
+      {{ sa_job_label }} job {{ sa_job_id }} ended {{ sa_job_rc_msg }} {{ sa_job_rc }}
+      (max RC {{ sa_job_max_rc }}) with {{ sa_job_messages | length }} flagged
+      message(s): {{ sa_job_messages }}
+    success_msg: "{{ sa_job_label }} job {{ sa_job_id }} ended CC {{ sa_job_rc }}"

@@ -1,0 +1,111 @@
+---
+# =============================================================================
+# Playbook : fix_zoau_apf.yml   (standalone)
+# Purpose  : Make ZOAU's authorized helper programs APF-authorized, so the
+#            ibm_zos_core modules work.  Fixes, for example:
+#              BGYSC0804E Unable to run authorized program opercmdhelper
+#                (zos_operator)
+#              BGYSC4008E Unable to run unauthorized program jsubhelper
+#                (zos_job_submit)
+#              BGYSC3404E Unable to run unauthorized program ddlshelper
+#            They lose the APF extended attribute when ZOAU is unpacked or
+#            copied without it, and on every reinstall or upgrade.
+#
+# Steps (from the LTE1 setup):
+#   1. RACF: READ on FACILITY BPX.FILEATTR.APF for the Ansible user (extattr
+#      +a needs it, also as UID 0: rsn=0924041A without it), and READ on
+#      BPX.SUPERUSER so the user can su to UID 0 (rsn=EF076043 without it).
+#   2. As UID 0 (su): extattr +a on every *helper in ZOAU's bin, plus opercmd
+#      and mvscmdauth.
+#   3. ls -E shows the result: the first attribute column must be "a".
+#
+# Uses only ansible.builtin.raw (z/OS UNIX shell over SSH, tsocmd for RACF):
+# no Python, no ZOAU, so it works before ZOAU itself does.  The Ansible user
+# needs RACF SPECIAL for step 1.
+#
+# Run:
+#   ansible-playbook -i sa_policy/inventory/local/new/inventory.yml sa_policy/playbooks/fix_zoau_apf.yml
+# =============================================================================
+- name: ZOAU | APF-authorize the helper programs
+  hosts: zos_host
+  gather_facts: false
+
+  vars:
+    zoau_bin: "{{ ZOAU }}/bin"                 # ZOAU from the inventory
+    apf_user: "{{ ansible_user | upper }}"
+    # One SSH session per task: the RACF changes of step 1 apply to new
+    # sessions only, not to a shared (ControlMaster) connection.
+    ansible_ssh_args: "-o ControlMaster=no -o ControlPath=none"
+
+  tasks:
+
+    - name: "ZOAU | Attributes before ({{ zoau_bin }})"
+      ansible.builtin.raw: |
+        ls -E {{ zoau_bin }} | grep -E 'helper|opercmd|mvscmdauth'
+      register: zoau_before
+      changed_when: false
+
+    - name: "ZOAU | Before"
+      ansible.builtin.debug:
+        msg: "{{ zoau_before.stdout_lines }}"
+
+    # =========================================================================
+    # 1. RACF
+    # =========================================================================
+    - name: "ZOAU | RACF: READ on BPX.FILEATTR.APF and BPX.SUPERUSER for {{ apf_user }}"
+      ansible.builtin.raw: |
+        for p in BPX.FILEATTR.APF BPX.SUPERUSER; do
+          if tsocmd "RLIST FACILITY $p" 2>&1 | grep -q ICH13003I; then
+            tsocmd "RDEFINE FACILITY $p UACC(NONE)" 2>&1
+          fi
+          tsocmd "PERMIT $p CLASS(FACILITY) ID({{ apf_user }}) ACCESS(READ)" 2>&1
+        done
+        tsocmd "SETROPTS RACLIST(FACILITY) REFRESH" 2>&1
+        for p in BPX.FILEATTR.APF BPX.SUPERUSER; do
+          echo "--- $p"; tsocmd "RLIST FACILITY $p AUTHUSER" 2>&1 | grep -E "{{ apf_user }}|ICH"
+        done
+      register: zoau_racf
+
+    - name: "ZOAU | RACF result"
+      ansible.builtin.debug:
+        msg: "{{ zoau_racf.stdout_lines }}"
+
+    # =========================================================================
+    # 2. extattr +a as UID 0 (new SSH session, so the new RACF access applies)
+    # =========================================================================
+    - name: "ZOAU | extattr +a as UID 0"
+      ansible.builtin.raw: |
+        cd {{ zoau_bin }} || exit 8
+        # One line: su runs each input line as a separate command.
+        files="opercmd mvscmdauth $(ls | grep 'helper$' | tr '\n' ' ')"
+        echo "id: $(echo id | su 2>&1)"
+        echo "files: $files"
+        echo "cd {{ zoau_bin }} && extattr +a $files" | su 2>&1
+      register: zoau_extattr
+
+    - name: "ZOAU | extattr result"
+      ansible.builtin.debug:
+        msg: "{{ zoau_extattr.stdout_lines }}"
+
+    # =========================================================================
+    # 3. Check
+    # =========================================================================
+    - name: "ZOAU | Attributes after"
+      ansible.builtin.raw: |
+        cd {{ zoau_bin }} && ls -E opercmd mvscmdauth $(ls | grep 'helper$')
+      register: zoau_after
+      changed_when: false
+
+    # ls -E line: <permissions> <extattr> ... <file>; extattr is 4 flags
+    # (a=APF p=program controlled s=shared AS l=shared library), "a-s-" when
+    # authorized, "--s-" when not.
+    - name: "ZOAU | Every helper must be APF-authorized"
+      vars:
+        _missing: "{{ zoau_after.stdout_lines | select('search', '\\s-[p-][s-][l-]\\s') | list }}"
+      ansible.builtin.assert:
+        that: _missing | length == 0
+        fail_msg: >-
+          Still not APF-authorized: {{ _missing }}. extattr result:
+          {{ zoau_extattr.stdout_lines }}.  rsn=0924041A: no READ on
+          BPX.FILEATTR.APF; rsn=EF076043 or su refused: not UID 0 (BPX.SUPERUSER).
+        success_msg: "{{ zoau_after.stdout_lines | length }} files APF-authorized in {{ zoau_bin }}."
