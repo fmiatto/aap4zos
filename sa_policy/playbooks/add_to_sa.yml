@@ -3,14 +3,17 @@
 # Playbook : add_to_sa.yml
 # Purpose  : Add the policies listed in sa_policies (vars/policies/*.yml) to
 #            SA z/OS and make them active, straight away:
-#              apply    - render all policies into one text file and apply it
-#                         to the PDB (SINGSAMP(INGEBFLT), AOFFBFL1)
+#              apply    - render all policies into one text file (VB, lines
+#                         up to sa_text_lrecl) and apply it to the PDB
+#                         (SINGSAMP(INGEBFLT), AOFFBFL1)
 #              build    - full build of the PDB (SINGSAMP(INGEBBLD), AOFFBBL1)
 #              activate - copy the build into a new generation of the
 #                         configuration GDG and INGAMS REFRESH to it
 #            Run one stage alone with --tags apply|build|activate.
 #            Choose policies with -e sa_policies=db2-dba1,cics62,rmf.
-#            System values: vars/sa_env.yml.
+#            Test on a copy of the PDB with -e sa_test_pdb=<dsn> (apply and
+#            build only; see vars/sa_env.yml).
+#            System values: vars/sa_env.yml.  Documentation: README.md.
 # =============================================================================
 - name: SA | Add policies to System Automation, build and activate
   hosts: zos_host
@@ -30,6 +33,11 @@
           tags: [always]
       tags: [always]
 
+    - name: "SA | Target PDB {{ sa_target_pdb_dsn }}, build {{ sa_target_build_dsn }}"
+      ansible.builtin.debug:
+        msg: "{{ 'TEST PDB - activate is disabled' if sa_target_pdb_dsn != sa_pdb_dsn else 'Live PDB' }}"
+      tags: [always]
+
     # =========================================================================
     # apply
     # =========================================================================
@@ -38,6 +46,24 @@
       vars:
         sa_jobname: "{{ sa_job.prefix }}TXUPD"
       block:
+
+        # Test PDB only: start from a copy of the live PDB.
+        - name: "SA | Test PDB {{ sa_target_pdb_dsn }}"
+          when: sa_target_pdb_dsn != sa_pdb_dsn
+          block:
+            - name: "SA | Does {{ sa_target_pdb_dsn }} exist"
+              ansible.builtin.shell: dls '{{ sa_target_pdb_dsn }}'
+              register: sa_test_pdb_ls
+              changed_when: false
+              failed_when: false
+
+            - name: "SA | Copy {{ sa_pdb_dsn }} into {{ sa_target_pdb_dsn }}"
+              ibm.ibm_zos_core.zos_copy:
+                src: "{{ sa_pdb_dsn }}"
+                dest: "{{ sa_target_pdb_dsn }}"
+                remote_src: true
+                replace: true
+              when: sa_test_pdb_ls.rc != 0 or (sa_test_pdb_refresh | default(false) | bool)
 
         - name: "SA | Work PDS {{ sa_work_pds }}"
           ibm.ibm_zos_core.zos_data_set:
@@ -51,13 +77,14 @@
             directory_blocks: 20
             state: present
 
-        # PDBUPD: sequential (AOFFBFL1 drops a member name).
+        # PDBUPD: sequential (AOFFBFL1 drops a member name), VB with up to
+        #         sa_text_lrecl data bytes (+4 for the record descriptor).
         # PDBRPT: PDS (LMINIT ENQ(SHRW) needs a partitioned data set).
         - name: "SA | Recreate {{ sa_source_dsn }} and {{ sa_report_dsn }}"
           ibm.ibm_zos_core.zos_data_set:
             name: "{{ item.name }}"
             type: "{{ item.type }}"
-            record_format: fb
+            record_format: "{{ item.recfm }}"
             record_length: "{{ item.lrecl }}"
             space_primary: 1
             space_secondary: 5
@@ -66,8 +93,8 @@
             replace: true
             state: present
           loop:
-            - { name: "{{ sa_source_dsn }}", type: seq, lrecl: 80 }
-            - { name: "{{ sa_report_dsn }}", type: pds, lrecl: 133 }
+            - { name: "{{ sa_source_dsn }}", type: seq, recfm: vb, lrecl: "{{ sa_text_lrecl | int + 4 }}" }
+            - { name: "{{ sa_report_dsn }}", type: pds, recfm: fb, lrecl: 133 }
           loop_control:
             label: "{{ item.name }}"
 
@@ -82,7 +109,6 @@
             replace: true
           loop:
             - { dest: "{{ sa_source_dsn }}", content: "{{ sa_textfile }}" }
-            - { dest: "{{ sa_work_pds }}(POLICY)", content: "{{ sa_textfile }}" }
             - { dest: "{{ sa_work_pds }}(TEXTUPD)", content: "{{ sa_textupd_jcl }}" }
           loop_control:
             label: "{{ item.dest }}"
@@ -122,9 +148,9 @@
         sa_jobname: "{{ sa_job.prefix }}BUILD"
       block:
 
-        - name: "SA | Recreate {{ sa_build_dsn }} empty (full build)"
+        - name: "SA | Recreate {{ sa_target_build_dsn }} empty (full build)"
           ibm.ibm_zos_core.zos_data_set:
-            name: "{{ sa_build_dsn }}"
+            name: "{{ sa_target_build_dsn }}"
             type: pdse
             record_format: fb
             record_length: 80
@@ -162,6 +188,14 @@
         sa_jobname: "{{ sa_job.prefix }}NEWGEN"
         _cfg_re: '^.*CONFIGURATION DATASET\s*=\s*(\S+).*$'
       block:
+
+        - name: "SA | No activation from a test PDB"
+          ansible.builtin.assert:
+            that: sa_target_pdb_dsn == sa_pdb_dsn
+            fail_msg: >-
+              sa_test_pdb is set: {{ sa_target_build_dsn }} is a test build and never goes
+              into {{ sa_config_gdg_base }}.  Run activate without -e sa_test_pdb.
+            quiet: true
 
         - name: "SA | ACF STATUS before"
           ibm.ibm_zos_core.zos_operator:

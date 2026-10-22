@@ -1,15 +1,15 @@
 ---
 # =============================================================================
 # File    : vars/sa_env.yml
-# Purpose : Everything add_to_sa.yml needs to know about the target system.
-#           Values are the ones that added DB2 DBA1 on LTE1 (SA 4.3).
+# Purpose : Everything add_to_sa.yml needs to know about the target system
+#           (LTE1, SA 4.3).
 # =============================================================================
 
 # ---------------------------------------------------------------------------
-# Policies to add, in order: file names in vars/policies/ without .yml.
+# Policies to process, in order: file names in vars/policies/ without .yml.
 # All of them go into one text file, one build and one activation.
-# A file that refers to another one's APG must come after it.
-# Override with -e sa_policies=cics62   or   -e sa_policies=db2-dba1,rmf
+# A file that refers to another file's entries (a class, an APG) comes after
+# it.  Override with -e sa_policies=cics62   or   -e sa_policies=db2-dba1,rmf
 # ---------------------------------------------------------------------------
 sa_policies:
   - db2-dba1
@@ -50,10 +50,28 @@ sa_dialog_libs:
 # Work data sets (the playbook creates them)
 # ---------------------------------------------------------------------------
 sa_work_hlq: SYSAUTO.PROTO
-sa_work_pds: "{{ sa_work_hlq }}.SAPDB.WORK"        # rendered text file and JCL
-sa_source_dsn: "{{ sa_work_pds }}.UPD"             # text file, sequential
+sa_work_pds: "{{ sa_work_hlq }}.SAPDB.WORK"        # JCL (FB 80)
+sa_source_dsn: "{{ sa_work_pds }}.UPD"             # text file, sequential VB
+# Longest text-file line.  255 is SA's own maximum for a text-file record.
+# The text file is VB, so lines are not padded with blanks (SA would count
+# the padding into AT override continuation lines, max 72 characters).
+sa_text_lrecl: 255
 sa_report_dsn: "{{ sa_work_pds }}.RPT"             # update report, PDS
 sa_build_dsn: "{{ sa_work_hlq }}.SAPDB.SOCNTL"     # build output, PDSE
+
+# ---------------------------------------------------------------------------
+# PDB and build output the jobs use: sa_pdb_dsn and sa_build_dsn, or with
+# -e sa_test_pdb=<dsn> a copy of the PDB (test PDB):
+#   apply    copies sa_pdb_dsn into <dsn> when <dsn> does not exist (or every
+#            time with -e sa_test_pdb_refresh=true) and updates <dsn>
+#   build    builds <dsn> into -e sa_test_build_dsn (default <dsn>.SOCNTL)
+#   activate refuses to run: a test build never goes into the GDG
+#   -e sa_test_pdb=SYSAUTO.PROTO.TESTPDB -e sa_policies=syntax-test
+# ---------------------------------------------------------------------------
+sa_target_pdb_dsn: "{{ sa_test_pdb | default(sa_pdb_dsn, true) }}"
+sa_target_build_dsn: >-
+  {{ (sa_test_build_dsn | default(sa_test_pdb ~ '.SOCNTL', true))
+     if (sa_test_pdb | default('', true) | length > 0) else sa_build_dsn }}
 
 # ---------------------------------------------------------------------------
 # Batch jobs
@@ -80,14 +98,15 @@ sa_refresh_wait: 30               # seconds to collect the INGAMS REFRESH respon
 # ---------------------------------------------------------------------------
 # Text-file update: SYS1.ING.SINGSAMP(INGEBFLT)
 #   AOFFBFL1 pdb_name, DD:PDB, DD:PDBUPD, DD:PDBRPT
-#   PDBUPD must be sequential (AOFFBFL1 opens it by data set name and drops a
-#   member name); PDBRPT must be a PDS (LMINIT ENQ(SHRW)).
+#   PDB is sa_target_pdb_dsn.  PDBUPD must be sequential (AOFFBFL1 opens it
+#   by data set name and drops a member name); PDBRPT must be a PDS
+#   (LMINIT ENQ(SHRW)).
 # ---------------------------------------------------------------------------
 sa_textupd:
   max_rc: 0
   dd:
     - { name: AOFTABL, spec: "SPACE=(TRK,(15,15,15)),RECFM=FB,LRECL=80,DSORG=PO" }
-    - { name: PDB, spec: "DISP=OLD,DSN={{ sa_pdb_dsn }}" }
+    - { name: PDB, spec: "DISP=OLD,DSN={{ sa_target_pdb_dsn }}" }
     - { name: PDBUPD, spec: "DISP=OLD,DSN={{ sa_source_dsn }}" }
     - { name: PDBRPT, spec: "DISP=OLD,DSN={{ sa_report_dsn }}" }
     - { name: ISPWRK1, spec: "UNIT=SYSALLDA,SPACE=(CYL,(5,10)),LRECL=256,RECFM=FB" }
@@ -110,8 +129,8 @@ sa_textupd:
     - "              NEWAPPL(AOF) BDISPMAX(999999)"
 
 # ---------------------------------------------------------------------------
-# Build: SYS1.ING.SINGSAMP(INGEBBLD), always a full build (ALL) into an empty
-# sa_build_dsn.
+# Build: SYS1.ING.SINGSAMP(INGEBBLD), always a full build (ALL) of
+# sa_target_pdb_dsn into an empty sa_target_build_dsn.
 #   AOFFBBL1 type, name, ALL|MODIFIED, sysplex, option, config,
 #            DD:PDB, pdb_name, enterprise, DD:SOCNTL
 #   Enterprise * = the name stored in the PDB.
@@ -119,8 +138,8 @@ sa_textupd:
 sa_build:
   max_rc: 0
   dd:
-    - { name: PDB, spec: "DISP=SHR,DSN={{ sa_pdb_dsn }}" }
-    - { name: SOCNTL, spec: "DISP=OLD,DSN={{ sa_build_dsn }}" }
+    - { name: PDB, spec: "DISP=SHR,DSN={{ sa_target_pdb_dsn }}" }
+    - { name: SOCNTL, spec: "DISP=OLD,DSN={{ sa_target_build_dsn }}" }
     - { name: ISPWRK1, spec: "UNIT=SYSALLDA,SPACE=(CYL,(5,10)),LRECL=256,RECFM=FB" }
     - { name: ISPWRK2, spec: "UNIT=SYSALLDA,SPACE=(CYL,(5,10)),LRECL=256,RECFM=FB" }
     - { name: ISPWRK3, spec: "UNIT=SYSALLDA,SPACE=(CYL,(5,10)),LRECL=256,RECFM=FB" }

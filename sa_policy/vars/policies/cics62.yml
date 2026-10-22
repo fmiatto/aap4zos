@@ -1,25 +1,22 @@
 ---
 # =============================================================================
 # File    : vars/policies/cics62.yml   (sa_policies name: cics62)
-# Purpose : CICS region CICS62 on LTE1, started only when DB2 DBA1 is fully up.
-#           Needs the APG DBA1_DB2: list db2-dba1 before cics62 in
-#           sa_policies, or add DB2 in an earlier run.
+# Purpose : CICS region CICS62 on LTE1: one APG and its APL, on the class
+#           C_CICS.
 #
-# From LTE1:
-#   D A,CICS*  -> CICS62 runs as an STC (PROC CICS62 in SYS1.USER.PROCLIB,
-#                 PGM=DFHSIP,PARM=SI); SA did not know it (AOF332I).
-#   C_CICS     -> existing class "Class for CICS", TYPE=CICS: STARTUP
+#   CICS62     -> STC, PROC CICS62 in SYS1.USER.PROCLIB (PGM=DFHSIP,PARM=SI).
+#   C_CICS     -> class "Class for CICS", category CICS: STARTUP
 #                 AUTO/COLD/INITIAL/NORM  MVS S &SUBSJOB,PARM='SI,START=...',
 #                 CICS message handling, replies DFHSI1578D GO, DFHKE0408D ASIS.
-#                 It has no shutdown commands (CICS0001 defines its own
-#                 SHUTNORM: CEMT P SHUT / CEMT P SHUT IMMED / C &SUBSJOB).
+#                 It has no shutdown commands: this file sets CICS62's own
+#                 (CEMT P SHUT / CEMT P SHUT IMMED / C &SUBSJOB).
 #
-# HASPARENT on the APG BASE_SYS: a BASIC APG is AVAILABLE only when all its
-# members are, so SA starts CICS62 after Basic z/OS tasks
+# Start order: HASPARENT on the APG BASE_SYS.  A BASIC APG is AVAILABLE only
+# when all its members are, so SA starts CICS62 after the base z/OS tasks.
 # =============================================================================
-# CICS62 is new to SA on the system: full add, NEW + UPD sections.
-# true would write only the UPD sections (entries that already exist).
-# -e sa_update_only=true on the command line overrides this for every file.
+# Full add: NEW sections create the entries, then the UPD sections.
+# true = UPD sections only, for entries that already exist
+# (-e sa_update_only=true does that for every file of a run).
 sa_update_only: false
 
 sa_new_policy:
@@ -46,10 +43,8 @@ sa_new_policy:
         - CICS TS region, PROC CICS62 in SYS1.USER.PROCLIB
       relationships:
         - { type: HASPARENT, resource: BASE_SYS/APG/= }
-      # Same shutdown as the existing APL CICS0001 (C_CICS has none).
-      # Each phase: NORM | IMMED | FORCE; each pass: pass number, command
-      # (max 37 characters, FB 80 text file), optional function
-      # (Automated Function/'*').
+      # Phases NORM | IMMED | FORCE; each pass: pass number, command (max 212
+      # characters), optional function (Automated Function/'*').
       shutdown:
         - phase: NORM
           passes:
@@ -58,35 +53,27 @@ sa_new_policy:
             - { pass: 4, command: "MVS C &SUBSJOB" }
 
   # ---------------------------------------------------------------------------
-  # update_sections - which UPD sections the text file gets.
-  #   The NEW sections create the APG and the APL (identity, class link, APG
-  #   membership).  Everything else is written afterwards in one "UPD APG"
-  #   section and one "UPD APL" section per APL, made of the parts switched
-  #   on here.  A part is only written for entries that have data for it.
-  #   All the fields are listed in the README.
-  #     apg               the APG's long_description, automation_name,
-  #                       behavior, automatically_link, relationships
-  #     description       long_description (and description when
-  #                       update-only) - field replacement
-  #     application_info  command_prefix / restart_after_ipl /
-  #                       external_startup / external_shutdown /
-  #                       skip_active_status - field replacement
-  #     relationships     relationships: - policy replacement: replaces ALL
-  #                       relationships of the APL, so list every one
-  #     messages          messages: - block replacement
-  #     startup           startup: - block replacement
-  #     shutdown          shutdown: - block replacement (replaces the APL's
-  #                       shutdown commands)
-  #     db2_control       db2_control: - policy replacement
-  #   sa_update_only: false (top of this file), so it is a full add: NEW + UPD.
-  #   With sa_update_only: true (file or -e) only the UPD sections are
-  #   written, to change an APL that already exists.
+  # update_sections - the UPD parts this file writes (left out = off).  A part
+  # is written only for entries that have data for it (fields: README).
+  #   apg               APG long_description, automation_name, behavior,
+  #                     automatically_link (field), relationships (policy)
+  #   description       long_description; in update-only files also
+  #                     description (field)
+  #   application_info  command_prefix, restart_after_ipl, external_startup,
+  #                     external_shutdown, skip_active_status (field)
+  #   relationships     replaces all relationships of the entry (policy)
+  #   messages          replaces all messages of the entry (block)
+  #   startup           replaces all start commands (block)
+  #   shutdown          replaces all stop commands (block)
+  #   thresholds        the entry's error thresholds (field)
+  #   minor_resources   replaces all minor resources (block)
+  #   db2_control       DB2 subsystem ID and active log, APLs only (policy)
   # ---------------------------------------------------------------------------
   update_sections:
     apg: true                         # CICS62_CICS long description
     description: true                 # long descriptions
     application_info: false           # nothing to set
-    relationships: true               # CICS62 -> DBA1_DB2 group
+    relationships: true               # CICS62 -> BASE_SYS group
     messages: false                   # C_CICS carries the messages
     startup: false                    # C_CICS carries the startup
     shutdown: true                    # C_CICS has no shutdown commands

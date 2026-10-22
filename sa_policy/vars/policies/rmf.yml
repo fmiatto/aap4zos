@@ -3,22 +3,18 @@
 # File    : vars/policies/rmf.yml   (sa_policies name: rmf)
 # Purpose : Update the existing APL RMF so SA starts it after every IPL.
 #
-# Why (LTE1, 2026-10-14):
-#   DISPINFO RMF  -> Restart after IPL : MAYBE (field empty in the APL, class
-#                    C_APPL), Last termination 04/27/26 without a SA shutdown
-#                    type.  After each IPL the agent sets RMF to STOPPED and
-#                    SA never starts it (INGINFO history: STOPPED 00:36:28,
-#                    nothing until the manual S RMF at 03:43).
-#   DISPINFO JES2 -> Restart after IPL : START (class C_JES2): restarted
-#                    after the same IPL although it was also stopped.
+#   Without the field, RMF takes Restart after IPL MAYBE from its class
+#   C_APPL: when RMF was stopped outside SA before an IPL, the agent sets it
+#   to STOPPED after the IPL and SA does not start it.  JES2 (class C_JES2,
+#   START) is restarted in the same situation.
 #
 # Only APPLICATION INFO / Restart after IPL is written ("field replacement"):
 # RMF's other fields, its HASPARENT JES2 relationship, the ERB306D reply and
 # its BASE_SYS membership stay as they are.
 # =============================================================================
-# RMF already exists in every system's PDB: no NEW sections, no apg:, only
-# the UPD section.  This applies to this file only; db2-dba1 and cics62 in
-# the same run still get their full NEW + UPD add.
+# Update-only: RMF already exists in the PDB, so no NEW sections and no
+# apg:, only the UPD section.  Other files of the same run keep their own
+# setting.
 sa_update_only: true
 
 sa_new_policy:
@@ -28,20 +24,21 @@ sa_new_policy:
       restart_after_ipl: START
 
   # ---------------------------------------------------------------------------
-  # update_sections - which UPD sections the text file gets.
-  #   Update-only file: the "UPD APL RMF" section is made of the parts
-  #   switched on here; a part is only written when the APL has data for it.
-  #     application_info  command_prefix / restart_after_ipl
-  #                       (field replacement: only these fields change)
-  #     relationships     relationships:
-  #                       (policy replacement: replaces ALL relationships of
-  #                       the APL - keep it off here, or RMF's HASPARENT JES2
-  #                       would have to be listed again)
-  #     shutdown          shutdown:
-  #                       (block replacement: replaces the APL's shutdown
-  #                       commands; RMF uses C_APPL's P RMF / C RMF)
-  #   The other parts (apg, description, messages, startup, db2_control)
-  #   are off when left out; see the README.
+  # update_sections - the UPD parts this file writes (left out = off).  A part
+  # is written only for entries that have data for it (fields: README).
+  #   apg               APG long_description, automation_name, behavior,
+  #                     automatically_link (field), relationships (policy)
+  #   description       long_description; in update-only files also
+  #                     description (field)
+  #   application_info  command_prefix, restart_after_ipl, external_startup,
+  #                     external_shutdown, skip_active_status (field)
+  #   relationships     replaces all relationships of the entry (policy)
+  #   messages          replaces all messages of the entry (block)
+  #   startup           replaces all start commands (block)
+  #   shutdown          replaces all stop commands (block)
+  #   thresholds        the entry's error thresholds (field)
+  #   minor_resources   replaces all minor resources (block)
+  #   db2_control       DB2 subsystem ID and active log, APLs only (policy)
   # ---------------------------------------------------------------------------
   update_sections:
     application_info: true            # Restart after IPL: START

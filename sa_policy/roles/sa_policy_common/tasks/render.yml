@@ -4,7 +4,10 @@
 #   with templates/apl.txt.j2 and join them, in list order, into one text
 #   file.
 #   Sets: sa_textfile        the combined text file
-#         sa_inglist_names   APGs created and all APLs, for the final INGLIST
+#         sa_inglist_names   APGs created and all APLs (not classes), for the
+#                            final INGLIST
+#   Runs on the control node only: with any tag that is not a stage, the
+#   playbook renders and checks the policies without touching the system.
 #   sa_policies: a list, or a comma-separated string from -e.
 # =============================================================================
 - name: "SA | Policies to add"
@@ -31,11 +34,11 @@
   ansible.builtin.set_fact:
     sa_textfile: "{{ sa_textfile_parts | join('\n\n') }}"
 
-# The work data sets are FB 80.
+# Text file records hold up to sa_text_lrecl (255) characters.
 - name: "SA | Check the text file layout"
   ansible.builtin.assert:
-    that: sa_textfile.splitlines() | map('length') | max <= 80
-    fail_msg: "Text file lines over 80 columns: {{ sa_textfile.splitlines() | select('match', '^.{81,}') | list }}"
+    that: sa_textfile.splitlines() | map('length') | max <= sa_text_lrecl | int
+    fail_msg: "Text file lines over {{ sa_text_lrecl }} columns: {{ sa_textfile.splitlines() | select('match', '^.{' ~ (sa_text_lrecl | int + 1) ~ ',}') | list }}"
     quiet: true
 
 - name: "SA | Policies: {{ sa_policy_list | join(', ') }}"

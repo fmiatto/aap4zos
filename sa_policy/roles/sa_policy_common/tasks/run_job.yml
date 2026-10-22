@@ -3,7 +3,7 @@
 # run_job.yml - Submit JCL stored in a data set member, wait for it, collect
 #               the output and fail on an unexpected RC or flagged messages.
 #   Input : sa_job_dsn     DSN(MEMBER) holding the JCL
-#           sa_job_label   short label for task names (e.g. "P3 text update")
+#           sa_job_label   short label for task names (e.g. "Text update")
 #           sa_job_max_rc  highest acceptable completion code
 #           sa_job_dds     optional: DDs to read with pjdd when
 #                          zos_job_output returns none

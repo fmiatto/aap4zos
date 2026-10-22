@@ -2,32 +2,22 @@
 # =============================================================================
 # File    : vars/policies/db2-dba1.yml   (sa_policies name: db2-dba1)
 # Purpose : DB2 subsystem DBA1 (MSTR, IRLM, DBM1, DIST) on LTE1: one APG and
-#           its APLs.  DBA1MSTR waits for the whole BASE_SYS group.
-#           Each APL links to a DB2 class that already exists in the PDB
-#           (C_DB2_NORM, C_DB2_DEPENDENTS), so it inherits start, stop and
-#           message policy; this file only adds identity, links and
-#           relationships.
+#           its APLs.  Each APL links to a DB2 class of the PDB (C_DB2_NORM,
+#           C_DB2_DEPENDENTS) and inherits its start, stop and message
+#           policy; this file adds identity, descriptions, relationships,
+#           the command prefix and DB2 CONTROL.
 #
-# How the APG and the APLs are connected:
-#   There is no key for it: every APL listed under apls: joins the APG of
-#   this file.  templates/apl.txt.j2 writes, after each NEW APL block,
-#     WHERE_USED APG      : <apg.name>     (APL becomes a member of the APG)
-#   and after the NEW APG block, for each entry in apg.systems,
-#     WHERE_USED SYS      : <system>       (APG is linked to the system)
-#   So the APLs reach the system through the APG.
+# Start order: DBA1MSTR waits for the whole BASE_SYS group; SA starts
+# DBA1MSTR, and DBA1MSTR starts and stops IRLM, DBM1 and DIST
+# (StartsMeAndStopsMe; C_DB2_DEPENDENTS sets external startup and shutdown
+# ALWAYS for them).
 #
-#   One file means exactly one APG, and every APL in it joins that APG.
-#   You can't put an APL in two APGs, or split one file's APLs across
-#   groups.  For those cases use separate files (as with cics62.yml, listed
-#   after this one in sa_policies), or the template would need a per-APL APG
-#   list.
-#
-#   Relationships (HASPARENT ...) do not change membership; they only set
-#   the start and stop order.
+# APG membership: every APL joins this file's APG (apgs: on an APL changes
+# that), and the APG is linked to the systems in apg.systems.
 # =============================================================================
-# DB2 DBA1 is new on the system: full add, NEW + UPD sections.
-# true would write only the UPD sections (entries that already exist).
-# -e sa_update_only=true on the command line overrides this for every file.
+# Full add: NEW sections create the entries, then the UPD sections.
+# true = UPD sections only, for entries that already exist
+# (-e sa_update_only=true does that for every file of a run).
 sa_update_only: false
 
 sa_new_policy:
@@ -37,9 +27,7 @@ sa_new_policy:
     type: SYSTEM                      # SYSTEM | SYSPLEX
     nature: BASIC                     # BASIC | MOVE | SERVER
     description: DB2 subsystem DBA1   # max 40 characters
-    # Up to 5 lines, max 50 characters each (FB 80 text file, see
-    # templates/apl.txt.j2).  Written with update_sections.apg.
-    long_description:
+    long_description:                 # max 5 lines x 50 characters
       - All DB2 DBA1 address spaces on LTE1
     systems:                          # systems the APG is linked to
       - LTE1
@@ -57,8 +45,8 @@ sa_new_policy:
         - Starts and stops IRLM, DBM1 and DIST
       command_prefix: "-DBA1"
       # DB2 CONTROL: the DB2 subsystem SA monitors through this APL.
-      # active_log_dataset (max 44 characters) is left out until the DBA1
-      # active log name is checked (-DBA1 DISPLAY LOG / DSNJU004 log map).
+      # active_log_dataset: the DBA1 active log data set name (from
+      # -DBA1 DISPLAY LOG or the DSNJU004 log map), not set here.
       db2_control:
         subsystem_id: DBA1            # 1-4 characters
       # DB2 starts only after the whole base system group is AVAILABLE (all
@@ -107,28 +95,21 @@ sa_new_policy:
         - { type: HASPARENT, resource: DBA1MSTR/APL/=, condition: StartsMeAndStopsMe }
 
   # ---------------------------------------------------------------------------
-  # update_sections - which UPD sections the text file gets.
-  #   The NEW sections create the APG and the APLs (identity, class link, APG
-  #   membership).  Everything else is written afterwards in one "UPD APG"
-  #   section and one "UPD APL" section per APL, made of the parts switched
-  #   on here.  A part is only written for entries that have data for it.
-  #   All the fields are listed in the README.
-  #     apg               the APG's long_description, automation_name,
-  #                       behavior, automatically_link, relationships
-  #     description       long_description (and description when
-  #                       update-only) - field replacement
-  #     application_info  command_prefix / restart_after_ipl /
-  #                       external_startup / external_shutdown /
-  #                       skip_active_status - field replacement
-  #     relationships     relationships: - policy replacement: replaces ALL
-  #                       relationships of the APL, so list every one
-  #     messages          messages: - block replacement
-  #     startup           startup: - block replacement
-  #     shutdown          shutdown: - block replacement
-  #     db2_control       db2_control: - policy replacement
-  #   sa_update_only: false (top of this file), so it is a full add: NEW + UPD.
-  #   With sa_update_only: true (file or -e) only the UPD sections are
-  #   written, to change APLs that already exist.
+  # update_sections - the UPD parts this file writes (left out = off).  A part
+  # is written only for entries that have data for it (fields: README).
+  #   apg               APG long_description, automation_name, behavior,
+  #                     automatically_link (field), relationships (policy)
+  #   description       long_description; in update-only files also
+  #                     description (field)
+  #   application_info  command_prefix, restart_after_ipl, external_startup,
+  #                     external_shutdown, skip_active_status (field)
+  #   relationships     replaces all relationships of the entry (policy)
+  #   messages          replaces all messages of the entry (block)
+  #   startup           replaces all start commands (block)
+  #   shutdown          replaces all stop commands (block)
+  #   thresholds        the entry's error thresholds (field)
+  #   minor_resources   replaces all minor resources (block)
+  #   db2_control       DB2 subsystem ID and active log, APLs only (policy)
   # ---------------------------------------------------------------------------
   update_sections:
     apg: true                         # DBA1_DB2 long description

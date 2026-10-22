@@ -1,23 +1,21 @@
 ---
 # =============================================================================
 # File    : vars/policies/mq1.yml   (sa_policies name: mq1)
-# Purpose : EXAMPLE - IBM MQ queue manager MQ1 (MSTR, CHIN) and the MQ web
-#           console as one APG.  Not in sa_policies: MQ is not installed on
-#           LTE1.  Add it with -e sa_policies=mq1 only on a system that runs
-#           ZQSXMSTR / ZQSXCHIN / MQWEB.
+# Purpose : IBM MQ queue manager MQ1 on LTE1: the queue manager (ZQSXMSTR),
+#           its channel initiator (ZQSXCHIN) and the MQ web console (MQWEB)
+#           as one APG.
 #
-# Taken from an export of another SA system (validate-future-config/MQAPG,
-# MQAPL), with its errors fixed:
-#   - ZQSXCHIN pointed to ZQSXSTR/APL/=: the parent is ZQSXMSTR.  The CHIN
-#     commands use &SUBPCMDPFX (the parent's command prefix, +MQ1), so they
-#     need the right parent too.
-#   - ZQSXMSTR and ZQSXCHIN link to no class: their startup, shutdown and
-#     "is available" messages are defined here.
+#   ZQSXMSTR, ZQSXCHIN -> no class: their start and stop commands and the
+#                         "is available" messages (AT status UP) are set here.
+#   MQWEB              -> no category, class C_APPL (generic STC).
 #
-# Shows the fields a policy can set besides the DB2 / CICS examples:
-# long_description, startup, messages (AT status, REPLY ...), APG
-# relationships, an APL with no category (MQWEB).
+# Start order: the APG waits for TCPIP; CHIN and MQWEB wait for ZQSXMSTR.
+# The CHIN commands use &SUBPCMDPFX, the command prefix of its parent
+# ZQSXMSTR (+MQ1).
 # =============================================================================
+# Full add: NEW sections create the entries, then the UPD sections.
+# true = UPD sections only, for entries that already exist
+# (-e sa_update_only=true does that for every file of a run).
 sa_update_only: false
 
 sa_new_policy:
@@ -32,8 +30,7 @@ sa_new_policy:
       - and the MQ web console
     systems:
       - LTE1
-    # APG relationships: the whole group waits for TCPIP.
-    relationships:
+    relationships:                    # the whole group waits for TCPIP
       - { type: HASPARENT, resource: TCPIP/APL/= }
 
   apls:
@@ -45,8 +42,7 @@ sa_new_policy:
       subcategory: MSTR
       description: IBM MQ queue manager MQ1
       command_prefix: "+MQ1"
-      # Commands, message texts and replies: max 37 characters each
-      # (FB 80 text file, see templates/apl.txt.j2).
+      # Commands and message texts: max 212 characters, replies 61.
       startup:
         - phase: STARTUP              # INIT | STARTUP | POSTSTART
           mixed_case: "NO"
@@ -80,11 +76,10 @@ sa_new_policy:
       category: MQ
       subcategory: CHIN
       description: IBM MQ channel initiator MQ1
-      # No StartsMe / StopsMe condition: SA starts and stops CHIN itself with
-      # the commands below, once ZQSXMSTR is up.  StartsMeAndStopsMe would
-      # mean the queue manager starts CHIN, which needs external_startup and
-      # external_shutdown ALWAYS and no commands here (build warning
-      # "has nothing or NEVER specified as external startup value").
+      # Plain HASPARENT: SA starts and stops CHIN itself with the commands
+      # below, once ZQSXMSTR is up.  (StartsMeAndStopsMe would mean the queue
+      # manager starts CHIN; that needs external_startup and
+      # external_shutdown ALWAYS instead of commands.)
       relationships:
         - type: HASPARENT
           resource: ZQSXMSTR/APL/=
@@ -115,7 +110,7 @@ sa_new_policy:
           description: Channel initiator is available
           at: { status: UP }
 
-    # No category: SA treats it as a generic STC through C_APPL.
+    # No category: a generic STC through C_APPL.
     - name: MQWEB
       subsystem: MQWEB
       job_name: MQWEB
@@ -126,8 +121,21 @@ sa_new_policy:
         - { type: HASPARENT, resource: ZQSXMSTR/APL/= }
 
   # ---------------------------------------------------------------------------
-  # update_sections - which UPD sections the text file gets (see cics62.yml
-  # or the README for the meaning of each part).
+  # update_sections - the UPD parts this file writes (left out = off).  A part
+  # is written only for entries that have data for it (fields: README).
+  #   apg               APG long_description, automation_name, behavior,
+  #                     automatically_link (field), relationships (policy)
+  #   description       long_description; in update-only files also
+  #                     description (field)
+  #   application_info  command_prefix, restart_after_ipl, external_startup,
+  #                     external_shutdown, skip_active_status (field)
+  #   relationships     replaces all relationships of the entry (policy)
+  #   messages          replaces all messages of the entry (block)
+  #   startup           replaces all start commands (block)
+  #   shutdown          replaces all stop commands (block)
+  #   thresholds        the entry's error thresholds (field)
+  #   minor_resources   replaces all minor resources (block)
+  #   db2_control       DB2 subsystem ID and active log, APLs only (policy)
   # ---------------------------------------------------------------------------
   update_sections:
     apg: true                         # MQ1_MQ long description, HASPARENT TCPIP

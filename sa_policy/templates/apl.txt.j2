@@ -1,35 +1,65 @@
 {#
   =============================================================================
   Template : apl.txt.j2
-  Purpose  : SA z/OS "Making Updates with Text Files" input that creates the
-             APG and APLs of one policy file (vars/policies/<name>.yml),
-             passed in as sa_new_policy by render_one.yml.
-  Rules    : NEW / UPD / COPY / WHERE_USED / LINK_TO_CLASS start in column 1.
-             Policy item lines are indented 1-2 columns, field lines 3+.
-             The APG section comes first so the APLs can link to it.
+  Purpose  : SA z/OS "Making Updates with Text Files" input for one policy
+             file (vars/policies/<name>.yml), passed in as sa_new_policy by
+             render_one.yml:
+               NEW sections   classes, the APG (WHERE_USED SYS), the APLs
+                              (LINK_TO_CLASS, WHERE_USED APG)
+               UPD sections   per class, APG and APL, the parts switched on
+                              in update_sections
              sa_update_only=true leaves out the NEW sections, to update
              entries that already exist.
-  Widths   : the text file is FB 80, so every value has a maximum width set
-             by the column its section puts the value in:
-               NEW / WHERE_USED lines                  column 23   58 chars
+  Rules    : NEW / UPD / WHERE_USED / LINK_TO_CLASS start in column 1.
+             Policy item lines are indented 1-2 columns, field lines 3+.
+             The separator column of a field is free; each section keeps
+             one column.  Classes come first, then the APG, so the APLs can
+             link to them.
+  Widths   : text-file lines hold up to sa_text_lrecl (255, SA's own
+             maximum) characters, so every value has a maximum width set by
+             the column its section puts the value in
+             (value width = lrecl - column + 1):
+               NEW / WHERE_USED lines                  column 23
                DESCRIPTION, APPLICATION INFO,
-               APPLGROUP INFO (field replacement)      column 28   53 chars
-                 (Long Description lines: 50)
-               RELATIONSHIPS                           column 40   41 chars
-               DB2 CONTROL                             column 36   45 chars
-               MESSAGES/USER DATA, STARTUP, SHUTDOWN   column 44   37 chars
+               APPLGROUP INFO (field replacement)      column 28
+               RELATIONSHIPS                           column 40
+               DB2 CONTROL                             column 36
+               MESSAGES/USER DATA, STARTUP, SHUTDOWN,
+               THRESHOLDS, MINOR RESOURCES             column 44
+             SA's own field limits come on top (reply text 61, AT override
+             lines 72, short description 40).
              roles/sa_policy_common/tasks/render_one.yml checks the policy
-             values against these widths: change both together.
+             values against these columns and limits: change both together.
   =============================================================================
 #}
 {% set p = sa_new_policy %}
 {% set us = p.update_sections | default({}) %}
 {% set has_apg = p.apg is defined %}
+{% set classes = p.classes | default([]) %}
+{% set apls = p.apls | default([]) %}
 {% set upd_only = sa_update_only | default(false) | bool %}
 {% macro kv(key, value, indent=2, col=20) %}{{ ' ' * indent }}{{ '%-*s' | format(col - indent, key) }}: {{ value }}{% endmacro %}
 {# YAML reads unquoted YES / NO as booleans: write them back as YES / NO. #}
 {% macro yn(value) %}{{ (('YES' if value else 'NO') if value is boolean else value) | default('', true) }}{% endmacro %}
 {% if not upd_only %}
+{#   Classes: APL entries with Object Type CLASS; LINK_TO_CLASS links a class
+     to its parent class (shown as UPWARD CLASS in a dialog export). #}
+{% for cls in classes %}
+NEW APL             : {{ cls.name }}
+{{ kv('Subsystem Name', cls.subsystem | default(cls.name)) }}
+{{ kv('Object Type', 'CLASS') }}
+{% if cls.category | default('') | length > 0 %}
+{{ kv('Category', cls.category) }}
+{% endif %}
+{% if cls.subcategory | default('') | length > 0 %}
+{{ kv('Subcategory', cls.subcategory) }}
+{% endif %}
+{{ kv('Short description', cls.description) }}
+{% if cls.link_to_class | default('') | length > 0 %}
+LINK_TO_CLASS       : {{ cls.link_to_class }}
+{% endif %}
+
+{% endfor %}
 {% if has_apg %}
 NEW APG             : {{ p.apg.name }}
 {{ kv('Type', p.apg.type) }}
@@ -39,7 +69,7 @@ NEW APG             : {{ p.apg.name }}
 WHERE_USED SYS      : {{ sys }}
 {% endfor %}
 {% endif %}
-{% for apl in p.apls %}
+{% for apl in apls %}
 
 NEW APL             : {{ apl.name }}
 {{ kv('Subsystem Name', apl.subsystem) }}
@@ -63,11 +93,12 @@ WHERE_USED APG      : {{ grp }}
 {% endfor %}
 {% endif %}
 {#
-  UPD sections: the file's APG first (update_sections.apg), then each APL.
-  Sections in the order of a dialog export.
+  UPD sections: classes, the file's APG (update_sections.apg), then each
+  APL.  Sections in the order of a dialog export.
 #}
-{% for e in ([p.apg] if has_apg else []) + p.apls %}
-{%   set is_apg = has_apg and loop.first %}
+{% for e in classes + ([p.apg] if has_apg else []) + apls %}
+{%   set is_cls = loop.index0 < classes | length %}
+{%   set is_apg = has_apg and loop.index0 == classes | length %}
 {%   set has_long = e.long_description | default([]) | length > 0 %}
 {%   set has_rels = e.relationships | default([]) | length > 0 %}
 {%   if is_apg %}
@@ -79,6 +110,8 @@ WHERE_USED APG      : {{ grp }}
 {%     set do_start = false %}
 {%     set do_shut = false %}
 {%     set do_db2 = false %}
+{%     set do_thr = false %}
+{%     set do_minor = false %}
 {%   else %}
 {%     set do_desc = (us.description | default(false)) and (has_long or (upd_only and e.description | default('') | length > 0)) %}
 {%     set do_grp = false %}
@@ -87,9 +120,11 @@ WHERE_USED APG      : {{ grp }}
 {%     set do_msgs = (us.messages | default(false)) and (e.messages | default([]) | length > 0) %}
 {%     set do_start = (us.startup | default(false)) and (e.startup | default([]) | length > 0) %}
 {%     set do_shut = (us.shutdown | default(false)) and (e.shutdown | default([]) | length > 0) %}
-{%     set do_db2 = (us.db2_control | default(false)) and (e.db2_control is defined) %}
+{%     set do_db2 = (us.db2_control | default(false)) and (e.db2_control is defined) and not is_cls %}
+{%     set do_thr = (us.thresholds | default(false)) and (e.thresholds is defined) %}
+{%     set do_minor = (us.minor_resources | default(false)) and (e.minor_resources | default([]) | length > 0) %}
 {%   endif %}
-{%   if do_desc or do_grp or do_info or do_rels or do_msgs or do_start or do_shut or do_db2 %}
+{%   if do_desc or do_grp or do_info or do_rels or do_msgs or do_start or do_shut or do_db2 or do_thr or do_minor %}
 
 UPD {{ 'APG' if is_apg else 'APL' }}             : {{ e.name }}
 {#   Field replacement: only the fields listed here change; the others keep
@@ -155,7 +190,7 @@ UPD {{ 'APG' if is_apg else 'APL' }}             : {{ e.name }}
      (Data Management, Update via File, option 1): separator in column 42
      at every level, "Action - <type>" with a dash, every field of an action
      entry written in export order (empty values allowed).  "block
-     replacement" replaces the APL's whole block. #}
+     replacement" replaces the entry's whole block. #}
 {%     if do_msgs %}
   MESSAGES/USER DATA                     ( block replacement )
 {%       for m in e.messages %}
@@ -189,6 +224,22 @@ UPD {{ 'APG' if is_apg else 'APL' }}             : {{ e.name }}
 {{ kv('Value Returned', c.value, 8, 41) }}
 {%           endfor %}
 {%         endif %}
+{#         CAPMSGS (message capturing): a CODE action with its own 9 fields
+           per captured message. #}
+{%         if m.capture | default([]) | length > 0 %}
+      {{ '%-35s' | format('Action') }}- CODE
+{%           for c in m.capture %}
+{{ kv('Message ID', c.msgid, 8, 41) }}
+{{ kv('Jobname', c.jobname | default(''), 8, 41) }}
+{{ kv('User (CODE3)', c.user | default(''), 8, 41) }}
+{{ kv('Severity', c.severity | default(''), 8, 41) }}
+{{ kv('Alert', yn(c.alert | default('')), 8, 41) }}
+{{ kv('Inform List', c.inform_list | default(''), 8, 41) }}
+{{ kv('Comment Type', c.comment_type | default(''), 8, 41) }}
+{{ kv('Comment Text', c.comment_text | default(''), 8, 41) }}
+{{ kv('DOM List', c.dom_list | default(''), 8, 41) }}
+{%           endfor %}
+{%         endif %}
 {%         if m.user | default([]) | length > 0 %}
       {{ '%-35s' | format('Action') }}- USER
 {%           for u in m.user %}
@@ -207,7 +258,21 @@ UPD {{ 'APG' if is_apg else 'APL' }}             : {{ e.name }}
 {{ kv('AT monitor status', m.at.monitor_status | default(''), 8, 41) }}
 {{ kv('AT Capture message selection', m.at.capture | default(''), 8, 41) }}
 {{ kv('AT Capture message DOM option', '', 8, 41) }}
+{#         AT override: one line per list entry; the first next to the
+           field name, the others as ": text" continuation lines with the
+           separator in the same column. #}
+{%           set ovr = m.at.override | default([]) %}
+{%           set ovr = ovr.splitlines() if ovr is string else ovr %}
+{%           if ovr | length == 0 %}
 {{ kv('AT override', '', 8, 41) }}
+{%           endif %}
+{%           for line in ovr %}
+{%             if loop.first %}
+{{ kv('AT override', line, 8, 41) }}
+{%             else %}
+{{ ' ' * 41 }}: {{ line }}
+{%             endif %}
+{%           endfor %}
 {%         endif %}
 {%       endfor %}
 {%     endif %}
@@ -237,9 +302,34 @@ UPD {{ 'APG' if is_apg else 'APL' }}             : {{ e.name }}
 {%         endfor %}
 {%       endfor %}
 {%     endif %}
+{#   THRESHOLDS: the entry's own error thresholds (number of errors within
+     an interval, hh:mm:ss).  MINOR RESOURCES: each minor resource with its
+     thresholds under a "Thresholds -" line. #}
+{%     if do_thr %}
+  THRESHOLDS                             ( field replacement )
+{{ kv('Critical Number', e.thresholds.critical_number | default(''), 4, 41) }}
+{{ kv('Critical Interval', e.thresholds.critical_interval | default(''), 4, 41) }}
+{{ kv('Frequent Number', e.thresholds.frequent_number | default(''), 4, 41) }}
+{{ kv('Frequent Interval', e.thresholds.frequent_interval | default(''), 4, 41) }}
+{{ kv('Infrequent Number', e.thresholds.infrequent_number | default(''), 4, 41) }}
+{{ kv('Infrequent Interval', e.thresholds.infrequent_interval | default(''), 4, 41) }}
+{%     endif %}
+{%     if do_minor %}
+  MINOR RESOURCES                        ( block replacement )
+{%       for mr in e.minor_resources %}
+{{ kv('Minor Resource Name', mr.name, 4, 41) }}
+      {{ '%-35s' | format('Thresholds') }}-
+{{ kv('Critical Number', mr.thresholds.critical_number | default(''), 8, 41) }}
+{{ kv('Critical Interval', mr.thresholds.critical_interval | default(''), 8, 41) }}
+{{ kv('Frequent Number', mr.thresholds.frequent_number | default(''), 8, 41) }}
+{{ kv('Frequent Interval', mr.thresholds.frequent_interval | default(''), 8, 41) }}
+{{ kv('Infrequent Number', mr.thresholds.infrequent_number | default(''), 8, 41) }}
+{{ kv('Infrequent Interval', mr.thresholds.infrequent_interval | default(''), 8, 41) }}
+{%       endfor %}
+{%     endif %}
 {#   DB2 CONTROL: the 7 fields of a dialog export, only Subsystem ID and
-     Active Log Dataset filled.  Separator in column 34 so a 44-character
-     data set name fits.  "policy replacement" replaces the whole record. #}
+     Active Log Dataset filled.  "policy replacement" replaces the whole
+     record. #}
 {%     if do_db2 %}
   DB2 CONTROL                    ( policy replacement )
 {{ kv('Subsystem ID', e.db2_control.subsystem_id, 4, 33) }}
