@@ -40,6 +40,8 @@ sa_new_policy:
   #     shutdown          shutdown:
   #                       (block replacement: replaces the APL's shutdown
   #                       commands; RMF uses C_APPL's P RMF / C RMF)
+  #   The other parts (apg, description, messages, startup, db2_control)
+  #   are off when left out; see the README.
   # ---------------------------------------------------------------------------
   update_sections:
     application_info: true            # Restart after IPL: START

@@ -1,0 +1,140 @@
+---
+# =============================================================================
+# File    : vars/policies/mq1.yml   (sa_policies name: mq1)
+# Purpose : EXAMPLE - IBM MQ queue manager MQ1 (MSTR, CHIN) and the MQ web
+#           console as one APG.  Not in sa_policies: MQ is not installed on
+#           LTE1.  Add it with -e sa_policies=mq1 only on a system that runs
+#           ZQSXMSTR / ZQSXCHIN / MQWEB.
+#
+# Taken from an export of another SA system (validate-future-config/MQAPG,
+# MQAPL), with its errors fixed:
+#   - ZQSXCHIN pointed to ZQSXSTR/APL/=: the parent is ZQSXMSTR.  The CHIN
+#     commands use &SUBPCMDPFX (the parent's command prefix, +MQ1), so they
+#     need the right parent too.
+#   - ZQSXMSTR and ZQSXCHIN link to no class: their startup, shutdown and
+#     "is available" messages are defined here.
+#
+# Shows the fields a policy can set besides the DB2 / CICS examples:
+# long_description, startup, messages (AT status, REPLY ...), APG
+# relationships, an APL with no category (MQWEB).
+# =============================================================================
+sa_update_only: false
+
+sa_new_policy:
+
+  apg:
+    name: MQ1_MQ
+    type: SYSTEM
+    nature: BASIC
+    description: IBM MQ queue manager MQ1
+    long_description:                 # max 5 lines x 50 characters
+      - Queue manager MQ1, its channel initiator
+      - and the MQ web console
+    systems:
+      - LTE1
+    # APG relationships: the whole group waits for TCPIP.
+    relationships:
+      - { type: HASPARENT, resource: TCPIP/APL/= }
+
+  apls:
+    - name: ZQSXMSTR
+      subsystem: ZQSXMSTR
+      job_name: ZQSXMSTR
+      job_type: MVS
+      category: MQ
+      subcategory: MSTR
+      description: IBM MQ queue manager MQ1
+      command_prefix: "+MQ1"
+      # Commands, message texts and replies: max 37 characters each
+      # (FB 80 text file, see templates/apl.txt.j2).
+      startup:
+        - phase: STARTUP              # INIT | STARTUP | POSTSTART
+          mixed_case: "NO"
+          commands:
+            - { command: "MVS &SUBSCMDPFX START QMGR" }
+      shutdown:
+        - phase: NORM
+          mixed_case: "NO"
+          passes:
+            - { pass: 1, command: "MVS &SUBSCMDPFX STOP QMGR" }
+            - { pass: 3, command: "MVS P &SUBSJOB" }
+            - { pass: 4, command: "MVS C &SUBSJOB" }
+        - phase: IMMED
+          mixed_case: "NO"
+          passes:
+            - { pass: 1, command: "MVS &SUBSCMDPFX STOP QMGR MODE(FORCE)" }
+            - { pass: 2, command: "MVS C &SUBSJOB" }
+        - phase: FORCE
+          mixed_case: "NO"
+          passes:
+            - { pass: 1, command: "MVS C &SUBSJOB" }
+      messages:
+        - id: CSQY022I
+          description: Queue manager is available
+          at: { status: UP }          # AT application status
+
+    - name: ZQSXCHIN
+      subsystem: ZQSXCHIN
+      job_name: ZQSXCHIN
+      job_type: MVS
+      category: MQ
+      subcategory: CHIN
+      description: IBM MQ channel initiator MQ1
+      # No StartsMe / StopsMe condition: SA starts and stops CHIN itself with
+      # the commands below, once ZQSXMSTR is up.  StartsMeAndStopsMe would
+      # mean the queue manager starts CHIN, which needs external_startup and
+      # external_shutdown ALWAYS and no commands here (build warning
+      # "has nothing or NEVER specified as external startup value").
+      relationships:
+        - type: HASPARENT
+          resource: ZQSXMSTR/APL/=
+          description: CHIN needs the queue manager
+      startup:
+        - phase: STARTUP
+          mixed_case: "NO"
+          commands:
+            - { command: "MVS &SUBPCMDPFX START CHINIT" }
+      shutdown:
+        - phase: NORM
+          mixed_case: "NO"
+          passes:
+            - { pass: 1, command: "MVS &SUBPCMDPFX STOP CHINIT" }
+            - { pass: 3, command: "MVS P &SUBSJOB" }
+            - { pass: 4, command: "MVS C &SUBSJOB" }
+        - phase: IMMED
+          mixed_case: "NO"
+          passes:
+            - { pass: 1, command: "MVS &SUBPCMDPFX STOP CHINIT" }
+            - { pass: 2, command: "MVS C &SUBSJOB" }
+        - phase: FORCE
+          mixed_case: "NO"
+          passes:
+            - { pass: 1, command: "MVS C &SUBSJOB" }
+      messages:
+        - id: CSQX022I
+          description: Channel initiator is available
+          at: { status: UP }
+
+    # No category: SA treats it as a generic STC through C_APPL.
+    - name: MQWEB
+      subsystem: MQWEB
+      job_name: MQWEB
+      job_type: MVS
+      link_to_class: C_APPL
+      description: IBM MQ web console
+      relationships:
+        - { type: HASPARENT, resource: ZQSXMSTR/APL/= }
+
+  # ---------------------------------------------------------------------------
+  # update_sections - which UPD sections the text file gets (see cics62.yml
+  # or the README for the meaning of each part).
+  # ---------------------------------------------------------------------------
+  update_sections:
+    apg: true                         # MQ1_MQ long description, HASPARENT TCPIP
+    description: true                 # long descriptions
+    application_info: true            # ZQSXMSTR: command prefix +MQ1
+    relationships: true
+    messages: true                    # CSQY022I / CSQX022I -> UP
+    startup: true                     # no class: start commands here
+    shutdown: true                    # no class: stop commands here
+    db2_control: false

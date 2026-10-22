@@ -16,17 +16,35 @@
     sa_pol_update_only: >-
       {{ (sa_update_only | default(false) | bool) or (sa_pol.sa_update_only | default(false) | bool) }}
 
+# apg: is optional: without it the APLs join no APG unless they list apgs:.
+# systems: may be empty (APG linked to no system, so not automated anywhere).
 - name: "SA | {{ sa_policy_name }}: check the APG"
   ansible.builtin.assert:
     that:
-      - sa_pol_policy.apg.name | length <= 20
+      - sa_pol_policy.apg.name is match('^[A-Z@#$][A-Z0-9@#$_]{0,19}$')
       - sa_pol_policy.apg.type in ['SYSTEM', 'SYSPLEX']
       - sa_pol_policy.apg.nature in ['BASIC', 'MOVE', 'SERVER']
       - sa_pol_policy.apg.description | length <= 40
-      - sa_pol_policy.apg.systems | length > 0
+      - sa_pol_policy.apg.systems | default([]) is sequence
     fail_msg: "{{ sa_policy_name }}: APG {{ sa_pol_policy.apg.name | default('(missing)') }} has an invalid field."
     quiet: true
-  when: not sa_pol_update_only | bool
+  when: not sa_pol_update_only | bool and sa_pol_policy.apg is defined
+
+- name: "SA | {{ sa_policy_name }}: check the APG update fields"
+  vars:
+    sa_g: "{{ sa_pol_policy.apg }}"
+  ansible.builtin.assert:
+    that:
+      - sa_g.name is match('^[A-Z@#$][A-Z0-9@#$_]{0,19}$')
+      - sa_g.automation_name is not defined or sa_g.automation_name is match('^[A-Z@#$][A-Z0-9@#$_]{0,19}$')
+      - sa_g.behavior is not defined or sa_g.behavior in ['ACTIVE', 'PASSIVE']
+      - sa_g.automatically_link is not defined or sa_g.automatically_link is boolean or sa_g.automatically_link in ['YES', 'NO']
+      - sa_g.long_description | default([]) | length <= 5
+      - sa_g.relationships | default([]) | selectattr('type', 'undefined') | list | length == 0
+      - sa_g.relationships | default([]) | selectattr('resource', 'undefined') | list | length == 0
+    fail_msg: "{{ sa_policy_name }}: APG {{ sa_g.name | default('(missing)') }} has an invalid field."
+    quiet: true
+  when: sa_pol_policy.apg is defined
 
 - name: "SA | {{ sa_policy_name }}: check the APLs"
   ansible.builtin.assert:
@@ -35,6 +53,7 @@
       - item.job_name is match('^[A-Z@#$][A-Z0-9@#$]{0,7}$')
       - item.job_type in ['MVS', 'NONMVS', 'TRANSIENT']
       - item.description | length <= 40
+      - item.apgs | default([]) | reject('match', '^[A-Z@#$][A-Z0-9@#$_]{0,19}$') | list | length == 0
     fail_msg: "{{ sa_policy_name }}: APL {{ item.name }} has an invalid field."
     quiet: true
   loop: "{{ sa_pol_policy.apls }}"
@@ -42,12 +61,117 @@
     label: "{{ item.name }}"
   when: not sa_pol_update_only | bool
 
+# A StartsMe / StopsMe condition means the parent starts / stops the APL, so
+# SA must treat its start / stop as external (the build warns "has nothing
+# or NEVER specified as external startup value").  Checked only for APLs
+# that link to no class: a class (as C_DB2_DEPENDENTS) can set the values.
+- name: "SA | {{ sa_policy_name }}: StartsMe / StopsMe need external startup / shutdown"
+  vars:
+    sa_conds: "{{ item.relationships | default([]) | map(attribute='condition', default='') | join(' ') }}"
+  ansible.builtin.assert:
+    that:
+      - "'StartsMe' not in sa_conds or item.external_startup | default('') in ['INITIAL', 'ALWAYS']"
+      - "'StopsMe' not in sa_conds or item.external_shutdown | default('') in ['FINAL', 'ALWAYS']"
+    fail_msg: >-
+      {{ sa_policy_name }}: APL {{ item.name }} has a StartsMe / StopsMe relationship but no
+      external_startup (INITIAL | ALWAYS) / external_shutdown (FINAL | ALWAYS) and no class.
+      Set them, or drop the condition if SA starts and stops the APL with its own commands.
+    quiet: true
+  loop: "{{ sa_pol_policy.apls }}"
+  loop_control:
+    label: "{{ item.name }}"
+  when: not sa_pol_update_only | bool and item.link_to_class | default('') | length == 0
+
 - name: "SA | {{ sa_policy_name }}: APL names valid and unique"
   ansible.builtin.assert:
     that:
       - sa_pol_policy.apls | map(attribute='name') | select('match', '^[A-Z@#$][A-Z0-9@#$_]{0,19}$') | list | length == sa_pol_policy.apls | length
       - sa_pol_policy.apls | map(attribute='name') | unique | length == sa_pol_policy.apls | length
     fail_msg: "{{ sa_policy_name }}: invalid or duplicate APL entry names."
+    quiet: true
+
+# Values of the UPD sections, in full adds and update-only files.
+# Messages: CAPMSGS has its own CODE layout and AT override spans several
+# lines; neither is supported yet.
+- name: "SA | {{ sa_policy_name }}: check the APL update fields"
+  vars:
+    sa_msgs: "{{ item.messages | default([]) }}"
+  ansible.builtin.assert:
+    that:
+      - item.description is not defined or item.description | length <= 40
+      - item.long_description | default([]) | length <= 5
+      - item.external_startup is not defined or item.external_startup in ['INITIAL', 'ALWAYS', 'NEVER']
+      - item.external_shutdown is not defined or item.external_shutdown in ['FINAL', 'ALWAYS', 'NEVER']
+      - item.skip_active_status is not defined or item.skip_active_status is boolean or item.skip_active_status in ['YES', 'NO']
+      - item.relationships | default([]) | selectattr('type', 'undefined') | list | length == 0
+      - item.relationships | default([]) | selectattr('resource', 'undefined') | list | length == 0
+      - item.startup | default([]) | map(attribute='phase') | reject('in', ['INIT', 'STARTUP', 'POSTSTART']) | list | length == 0
+      - item.startup | default([]) | selectattr('commands', 'undefined') | list | length == 0
+      - item.startup | default([]) | map(attribute='commands') | flatten | selectattr('command', 'undefined') | list | length == 0
+      - item.shutdown | default([]) | map(attribute='phase') | reject('in', ['NORM', 'IMMED', 'FORCE']) | list | length == 0
+      - item.shutdown | default([]) | map(attribute='passes') | flatten | selectattr('command', 'undefined') | list | length == 0
+      - sa_msgs | selectattr('id', 'undefined') | list | length == 0
+      - sa_msgs | map(attribute='id') | select('equalto', 'CAPMSGS') | list | length == 0
+      - sa_msgs | map(attribute='cmd', default=[]) | flatten | selectattr('command', 'undefined') | list | length == 0
+      - sa_msgs | map(attribute='reply', default=[]) | flatten | selectattr('text', 'undefined') | list | length == 0
+      - sa_msgs | map(attribute='code', default=[]) | flatten | selectattr('value', 'undefined') | list | length == 0
+      - sa_msgs | map(attribute='user', default=[]) | flatten | selectattr('keyword', 'undefined') | list | length == 0
+      - sa_msgs | selectattr('at', 'defined') | map(attribute='at') | map('dict2items') | flatten | map(attribute='key') | reject('in', ['status', 'monitor_status', 'capture']) | list | length == 0
+      - item.db2_control is not defined or item.db2_control.subsystem_id | default('') is match('^[A-Z@#$][A-Z0-9@#$]{0,3}$')
+    fail_msg: "{{ sa_policy_name }}: APL {{ item.name }} has an invalid update field."
+    quiet: true
+  loop: "{{ sa_pol_policy.apls }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+# The text file is FB 80: each value must fit after its field name.  Widths
+# per section are in templates/apl.txt.j2 (header); change both together.
+#   short description 40 (SA), long description lines 50, relationships 41,
+#   DB2 CONTROL 45, MESSAGES/USER DATA, STARTUP and SHUTDOWN values 37.
+- name: "SA | {{ sa_policy_name }}: values fit in 80 columns"
+  vars:
+    sa_too_long: >-
+      {%- macro chk(label, value, width) -%}
+      {%- if (value | default('', true) | string | length) > width -%}
+      {{ label }} is {{ value | string | length }} chars, max {{ width }}; {% endif -%}
+      {%- endmacro -%}
+      {%- set p = sa_pol_policy -%}
+      {%- for e in ([p.apg] if p.apg is defined else []) + p.apls -%}
+      {%-   set w = ('APG ' if (p.apg is defined and loop.first) else 'APL ') ~ e.name ~ ' ' -%}
+      {{-   chk(w ~ 'description', e.description, 40) -}}
+      {%-   for line in e.long_description | default([]) -%}
+      {{-     chk(w ~ 'long_description line ' ~ loop.index, line, 50) -}}
+      {%-   endfor -%}
+      {%-   for r in e.relationships | default([]) -%}
+      {%-     for k, v in r.items() -%}{{- chk(w ~ 'relationship ' ~ loop.index ~ ' ' ~ k, v, 41) -}}{%- endfor -%}
+      {%-   endfor -%}
+      {%-   for m in e.messages | default([]) -%}
+      {{-     chk(w ~ 'message id', m.id, 37) -}}
+      {{-     chk(w ~ 'message ' ~ m.id ~ ' description', m.description, 37) -}}
+      {%-     for kind in ['cmd', 'reply', 'code', 'user'] -%}
+      {%-       for a in m[kind] | default([]) -%}
+      {%-         for k, v in a.items() -%}{{- chk(w ~ 'message ' ~ m.id ~ ' ' ~ kind ~ ' ' ~ k, v, 37) -}}{%- endfor -%}
+      {%-       endfor -%}
+      {%-     endfor -%}
+      {%-     for k, v in (m.at | default({})).items() -%}{{- chk(w ~ 'message ' ~ m.id ~ ' at ' ~ k, v, 37) -}}{%- endfor -%}
+      {%-   endfor -%}
+      {%-   for ph in e.startup | default([]) -%}
+      {%-     for c in ph.commands | default([]) -%}
+      {%-       for k, v in c.items() -%}{{- chk(w ~ 'startup ' ~ ph.phase ~ ' ' ~ k, v, 37) -}}{%- endfor -%}
+      {%-     endfor -%}
+      {%-   endfor -%}
+      {%-   for ph in e.shutdown | default([]) -%}
+      {%-     for ps in ph.passes | default([]) -%}
+      {%-       for k, v in ps.items() -%}{{- chk(w ~ 'shutdown ' ~ ph.phase ~ ' pass ' ~ ps.pass ~ ' ' ~ k, v, 37) -}}{%- endfor -%}
+      {%-     endfor -%}
+      {%-   endfor -%}
+      {%-   if e.db2_control is defined -%}
+      {{-     chk(w ~ 'db2_control active_log_dataset', e.db2_control.active_log_dataset, 45) -}}
+      {%-   endif -%}
+      {%- endfor -%}
+  ansible.builtin.assert:
+    that: sa_too_long | default('', true) | trim | length == 0
+    fail_msg: "{{ sa_policy_name }}: too long for the 80-column text file: {{ sa_too_long | default('', true) | trim }}"
     quiet: true
 
 - name: "SA | {{ sa_policy_name }}: render templates/apl.txt.j2"

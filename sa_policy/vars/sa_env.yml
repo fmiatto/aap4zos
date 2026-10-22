@@ -15,6 +15,7 @@ sa_policies:
   - db2-dba1
   - cics62
   - rmf
+  - mq1
 
 # ---------------------------------------------------------------------------
 # SA z/OS on the target system

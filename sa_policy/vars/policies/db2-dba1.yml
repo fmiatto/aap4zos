@@ -37,6 +37,10 @@ sa_new_policy:
     type: SYSTEM                      # SYSTEM | SYSPLEX
     nature: BASIC                     # BASIC | MOVE | SERVER
     description: DB2 subsystem DBA1   # max 40 characters
+    # Up to 5 lines, max 50 characters each (FB 80 text file, see
+    # templates/apl.txt.j2).  Written with update_sections.apg.
+    long_description:
+      - All DB2 DBA1 address spaces on LTE1
     systems:                          # systems the APG is linked to
       - LTE1
 
@@ -49,7 +53,14 @@ sa_new_policy:
       subcategory: MSTR
       link_to_class: C_DB2_NORM
       description: DB2 DBA1 - system services (MSTR)
+      long_description:               # max 5 lines x 50 characters
+        - Starts and stops IRLM, DBM1 and DIST
       command_prefix: "-DBA1"
+      # DB2 CONTROL: the DB2 subsystem SA monitors through this APL.
+      # active_log_dataset (max 44 characters) is left out until the DBA1
+      # active log name is checked (-DBA1 DISPLAY LOG / DSNJU004 log map).
+      db2_control:
+        subsystem_id: DBA1            # 1-4 characters
       # DB2 starts only after the whole base system group is AVAILABLE (all
       # its members), and is stopped before it.  Only MSTR needs this: SA
       # starts MSTR, and MSTR starts IRLM, DBM1 and DIST (StartsMeAndStopsMe).
@@ -64,6 +75,8 @@ sa_new_policy:
       subcategory: IRLM
       link_to_class: C_DB2_DEPENDENTS
       description: DB2 DBA1 - lock manager (IRLM)
+      long_description:
+        - Lock manager, started by DBA1MSTR
       relationships:
         - { type: HASPARENT, resource: DBA1MSTR/APL/=, condition: StartsMeAndStopsMe }
 
@@ -75,6 +88,8 @@ sa_new_policy:
       subcategory: DBM1
       link_to_class: C_DB2_DEPENDENTS
       description: DB2 DBA1 - database services (DBM1)
+      long_description:
+        - Database services, started by DBA1MSTR
       relationships:
         - { type: HASPARENT, resource: DBA1MSTR/APL/=, condition: StartsMeAndStopsMe }
 
@@ -86,28 +101,41 @@ sa_new_policy:
       subcategory: DIST
       link_to_class: C_DB2_DEPENDENTS
       description: DB2 DBA1 - distributed data (DIST)
+      long_description:
+        - Distributed data, started by DBA1MSTR
       relationships:
         - { type: HASPARENT, resource: DBA1MSTR/APL/=, condition: StartsMeAndStopsMe }
 
   # ---------------------------------------------------------------------------
   # update_sections - which UPD sections the text file gets.
   #   The NEW sections create the APG and the APLs (identity, class link, APG
-  #   membership).  Everything else an APL needs is written afterwards in one
-  #   "UPD APL" section per APL, made of the parts switched on here.  A part
-  #   is only written for APLs that have data for it.
-  #     application_info  command_prefix / restart_after_ipl
-  #                       (field replacement: only these fields change)
-  #     relationships     relationships:
-  #                       (policy replacement: replaces ALL relationships of
-  #                       the APL, so list every one it should have)
-  #     shutdown          shutdown:
-  #                       (block replacement: replaces the APL's shutdown
-  #                       commands)
+  #   membership).  Everything else is written afterwards in one "UPD APG"
+  #   section and one "UPD APL" section per APL, made of the parts switched
+  #   on here.  A part is only written for entries that have data for it.
+  #   All the fields are listed in the README.
+  #     apg               the APG's long_description, automation_name,
+  #                       behavior, automatically_link, relationships
+  #     description       long_description (and description when
+  #                       update-only) - field replacement
+  #     application_info  command_prefix / restart_after_ipl /
+  #                       external_startup / external_shutdown /
+  #                       skip_active_status - field replacement
+  #     relationships     relationships: - policy replacement: replaces ALL
+  #                       relationships of the APL, so list every one
+  #     messages          messages: - block replacement
+  #     startup           startup: - block replacement
+  #     shutdown          shutdown: - block replacement
+  #     db2_control       db2_control: - policy replacement
   #   sa_update_only: false (top of this file), so it is a full add: NEW + UPD.
   #   With sa_update_only: true (file or -e) only the UPD sections are
   #   written, to change APLs that already exist.
   # ---------------------------------------------------------------------------
   update_sections:
+    apg: true                         # DBA1_DB2 long description
+    description: true                 # long descriptions
     application_info: true            # DBA1MSTR: command prefix -DBA1
     relationships: true               # MSTR -> BASE_SYS, IRLM/DBM1/DIST -> MSTR
+    messages: false                   # the DB2 classes carry the messages
+    startup: false                    # the DB2 classes carry the startup
     shutdown: false                   # the DB2 classes carry the shutdown
+    db2_control: true                 # DBA1MSTR: subsystem DBA1

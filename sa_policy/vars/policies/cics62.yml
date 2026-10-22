@@ -29,6 +29,8 @@ sa_new_policy:
     type: SYSTEM
     nature: BASIC
     description: CICS region CICS62
+    long_description:                 # max 5 lines x 50 characters
+      - CICS TS region CICS62 on LTE1
     systems:
       - LTE1
 
@@ -40,11 +42,14 @@ sa_new_policy:
       category: CICS                  # TYPE=CICS, no subtype (as CICS0001)
       link_to_class: C_CICS
       description: CICS region CICS62
+      long_description:               # max 5 lines x 50 characters
+        - CICS TS region, PROC CICS62 in SYS1.USER.PROCLIB
       relationships:
         - { type: HASPARENT, resource: BASE_SYS/APG/= }
       # Same shutdown as the existing APL CICS0001 (C_CICS has none).
-      # Each phase: NORM | IMMED | FORCE; each pass: pass number, command,
-      # optional function (Automated Function/'*').
+      # Each phase: NORM | IMMED | FORCE; each pass: pass number, command
+      # (max 37 characters, FB 80 text file), optional function
+      # (Automated Function/'*').
       shutdown:
         - phase: NORM
           passes:
@@ -55,22 +60,34 @@ sa_new_policy:
   # ---------------------------------------------------------------------------
   # update_sections - which UPD sections the text file gets.
   #   The NEW sections create the APG and the APL (identity, class link, APG
-  #   membership).  Everything else is written afterwards in one "UPD APL"
-  #   section per APL, made of the parts switched on here.  A part is only
-  #   written for APLs that have data for it.
-  #     application_info  command_prefix / restart_after_ipl
-  #                       (field replacement: only these fields change)
-  #     relationships     relationships:
-  #                       (policy replacement: replaces ALL relationships of
-  #                       the APL, so list every one it should have)
-  #     shutdown          shutdown:
-  #                       (block replacement: replaces the APL's shutdown
-  #                       commands)
+  #   membership).  Everything else is written afterwards in one "UPD APG"
+  #   section and one "UPD APL" section per APL, made of the parts switched
+  #   on here.  A part is only written for entries that have data for it.
+  #   All the fields are listed in the README.
+  #     apg               the APG's long_description, automation_name,
+  #                       behavior, automatically_link, relationships
+  #     description       long_description (and description when
+  #                       update-only) - field replacement
+  #     application_info  command_prefix / restart_after_ipl /
+  #                       external_startup / external_shutdown /
+  #                       skip_active_status - field replacement
+  #     relationships     relationships: - policy replacement: replaces ALL
+  #                       relationships of the APL, so list every one
+  #     messages          messages: - block replacement
+  #     startup           startup: - block replacement
+  #     shutdown          shutdown: - block replacement (replaces the APL's
+  #                       shutdown commands)
+  #     db2_control       db2_control: - policy replacement
   #   sa_update_only: false (top of this file), so it is a full add: NEW + UPD.
   #   With sa_update_only: true (file or -e) only the UPD sections are
   #   written, to change an APL that already exists.
   # ---------------------------------------------------------------------------
   update_sections:
+    apg: true                         # CICS62_CICS long description
+    description: true                 # long descriptions
     application_info: false           # nothing to set
     relationships: true               # CICS62 -> DBA1_DB2 group
+    messages: false                   # C_CICS carries the messages
+    startup: false                    # C_CICS carries the startup
     shutdown: true                    # C_CICS has no shutdown commands
+    db2_control: false

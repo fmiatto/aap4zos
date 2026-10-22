@@ -7,7 +7,9 @@ freshly built systems: it goes straight to the PDB and the live configuration, w
 backups, checks or approvals.
 
 The examples in `vars/policies/` (LTE1, SA 4.3): DB2 subsystem DBA1 after the base system,
-CICS region CICS62 after DB2, and RMF restarted after every IPL.
+CICS region CICS62 after DB2, and RMF restarted after every IPL. `mq1.yml` (IBM MQ with its own
+start and stop commands and messages) is an example only: it is not in `sa_policies`, because
+MQ is not installed on LTE1.
 
 ## Requirements
 
@@ -79,10 +81,15 @@ sa_new_policy:
       relationships:
         - { type: HASPARENT, resource: DBA1MSTR/APL/=, condition: StartsMeAndStopsMe }
 
-  update_sections:
-    application_info: true            # command_prefix, restart_after_ipl
+  update_sections:                    # which UPD sections to write (off when left out)
+    apg: false                        # APG long_description, info, relationships
+    description: true                 # long_description
+    application_info: true            # command_prefix, restart_after_ipl, ...
     relationships: true
+    messages: false
+    startup: false
     shutdown: false
+    db2_control: false
 ```
 
 - Relationships (dependencies): `type` and `resource` are required; `condition`,
@@ -101,6 +108,73 @@ sa_new_policy:
             - { pass: 2, command: "MVS F &SUBSJOB,CEMT P SHUT IMMED" }
             - { pass: 4, command: "MVS C &SUBSJOB" }
   ```
+
+- Start commands, for an APL whose class has none, with `update_sections.startup: true`.
+  `type` is the start type (`NORM`, `COLD`, ... or empty for all):
+
+  ```yaml
+      startup:
+        - phase: STARTUP              # INIT | STARTUP | POSTSTART
+          mixed_case: "NO"            # optional
+          commands:
+            - { command: "MVS &SUBSCMDPFX START QMGR" }
+            - { type: COLD, command: "MVS S &SUBSJOB,PARM=COLD" }
+  ```
+
+- Messages, with `update_sections.messages: true` (block replacement: the list replaces all
+  the APL's messages). Each message has an `id`, an optional `description`, and any of these
+  actions, written in this order:
+
+  ```yaml
+      messages:
+        - id: CSQY022I
+          description: Queue manager is available
+          at: { status: UP }          # AT: status, monitor_status, capture
+        - id: DFS3907A
+          reply: [{ text: S }]        # REPLY: text, selection, retry
+        - id: DSNP007I
+          cmd: [{ selection: RECOVER, command: "MSG LOG RECOVERY NEEDED" }]   # CMD: command, selection, function
+          code: [{ code1: "*DSNDB01*", code2: "*", code3: BATCH, value: RECOVER }]
+        - id: CICSINFO
+          user: [{ keyword: CICSCMD, data: "('ACTIVE TASKS','CEMT I TA')" }]
+  ```
+
+  Not supported yet: `CAPMSGS` (its CODE entries have their own layout) and `AT override`
+  (several lines). The checks reject both.
+
+- More APL fields:
+
+  | Field | Section (`update_sections`) | Values |
+  |---|---|---|
+  | `long_description` | `description` | up to 5 lines |
+  | `external_startup` | `application_info` | `INITIAL`, `ALWAYS`, `NEVER` |
+  | `external_shutdown` | `application_info` | `FINAL`, `ALWAYS`, `NEVER` |
+  | `skip_active_status` | `application_info` | `YES`, `NO` |
+  | `db2_control` | `db2_control` | `subsystem_id` (1-4 chars), `active_log_dataset` |
+  | `apgs` | (NEW) | APGs the APL joins: default the file's APG, `[]` for none, or several |
+  | `category` | (NEW) | optional |
+
+  In an update-only file, `description` with `update_sections.description` also changes the
+  short description.
+
+- More APG fields, written with `update_sections.apg: true`: `long_description`,
+  `automation_name`, `behavior` (`ACTIVE` | `PASSIVE`), `automatically_link` (`YES` | `NO`),
+  `relationships` (as for an APL; policy replacement). `apg:` itself is optional, and
+  `systems` may be empty. An APG linked to no system, or an APL in no APG, is defined in the
+  PDB but not automated anywhere.
+
+- **Field widths.** The text file is FB 80, so each value must fit after its field name. The
+  checks stop the run before anything is submitted, naming the field that is too long:
+
+  | Values | Max |
+  |---|---|
+  | `description` (SA limit) | 40 |
+  | `long_description` lines | 50 |
+  | relationship values | 41 |
+  | `db2_control.active_log_dataset` | 45 |
+  | message, startup and shutdown values (commands, texts, replies, codes) | 37 |
+
+  The widths come from the columns in `templates/apl.txt.j2` (see its header).
 
 - `restart_after_ipl: START` makes SA start the APL after every IPL. Without it the class
   default applies (`C_APPL`: MAYBE), and SA does not restart an application that was stopped
@@ -136,8 +210,8 @@ ansible-playbook -i sa_policy/inventory/local/inventory.yml sa_policy/playbooks/
 Run a single stage with `--tags apply`, `--tags build` or `--tags activate`.
 
 `-e sa_update_only=true` makes every listed policy update-only: use it to change entries that
-already exist (relationships, shutdown, command prefix, restart after IPL) on a system where
-the APGs and APLs were added before.
+already exist (descriptions, relationships, messages, startup, shutdown, application info, DB2
+control) on a system where the APGs and APLs were added before.
 
 The text-file layout of any existing entry can be seen by exporting it in the dialog:
 `5 Data Management` → `3 Update via File` → `1 Write selected data from Policy Database to file`.
@@ -159,3 +233,10 @@ print them.
   `DSITBL01 INGMSGSA INGMSG01` and MPF `.NO_ENTRY AUTO(YES)`.
 - Start and stop through SA once active: `INGREQ DBA1MSTR/APL/LTE1 REQ=START` (or `STOP`); see
   `zos_admin/sysauto_*.yml`.
+
+## Not supported yet
+
+- Classes (`Object Type: CLASS`): the classes an APL links to must already exist in the PDB.
+- `AT override` and other multi-line values, and commands longer than 37 characters (they
+  need continuation lines or a narrower layout, both untested).
+- `CAPMSGS` message capturing, THRESHOLDS and MINOR RESOURCES.

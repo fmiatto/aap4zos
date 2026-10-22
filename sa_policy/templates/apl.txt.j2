@@ -9,23 +9,43 @@
              The APG section comes first so the APLs can link to it.
              sa_update_only=true leaves out the NEW sections, to update
              entries that already exist.
+  Widths   : the text file is FB 80, so every value has a maximum width set
+             by the column its section puts the value in:
+               NEW / WHERE_USED lines                  column 23   58 chars
+               DESCRIPTION, APPLICATION INFO,
+               APPLGROUP INFO (field replacement)      column 28   53 chars
+                 (Long Description lines: 50)
+               RELATIONSHIPS                           column 40   41 chars
+               DB2 CONTROL                             column 36   45 chars
+               MESSAGES/USER DATA, STARTUP, SHUTDOWN   column 44   37 chars
+             roles/sa_policy_common/tasks/render_one.yml checks the policy
+             values against these widths: change both together.
   =============================================================================
 #}
 {% set p = sa_new_policy %}
+{% set us = p.update_sections | default({}) %}
+{% set has_apg = p.apg is defined %}
+{% set upd_only = sa_update_only | default(false) | bool %}
 {% macro kv(key, value, indent=2, col=20) %}{{ ' ' * indent }}{{ '%-*s' | format(col - indent, key) }}: {{ value }}{% endmacro %}
-{% if not (sa_update_only | default(false) | bool) %}
+{# YAML reads unquoted YES / NO as booleans: write them back as YES / NO. #}
+{% macro yn(value) %}{{ (('YES' if value else 'NO') if value is boolean else value) | default('', true) }}{% endmacro %}
+{% if not upd_only %}
+{% if has_apg %}
 NEW APG             : {{ p.apg.name }}
 {{ kv('Type', p.apg.type) }}
 {{ kv('Nature', p.apg.nature) }}
 {{ kv('Short description', p.apg.description) }}
-{% for sys in p.apg.systems %}
+{% for sys in p.apg.systems | default([]) %}
 WHERE_USED SYS      : {{ sys }}
 {% endfor %}
+{% endif %}
 {% for apl in p.apls %}
 
 NEW APL             : {{ apl.name }}
 {{ kv('Subsystem Name', apl.subsystem) }}
+{% if apl.category | default('') | length > 0 %}
 {{ kv('Category', apl.category) }}
+{% endif %}
 {% if apl.subcategory | default('') | length > 0 %}
 {{ kv('Subcategory', apl.subcategory) }}
 {% endif %}
@@ -35,33 +55,90 @@ NEW APL             : {{ apl.name }}
 {% if apl.link_to_class | default('') | length > 0 %}
 LINK_TO_CLASS       : {{ apl.link_to_class }}
 {% endif %}
-WHERE_USED APG      : {{ p.apg.name }}
+{#   APG membership: the file's APG unless the APL lists its own (apgs: [] =
+     in no APG). #}
+{% for grp in apl.apgs | default([p.apg.name] if has_apg else []) %}
+WHERE_USED APG      : {{ grp }}
+{% endfor %}
 {% endfor %}
 {% endif %}
-{% for apl in p.apls %}
-{%   set do_info = p.update_sections.application_info and ((apl.command_prefix | default('') | length > 0) or (apl.restart_after_ipl | default('') | length > 0)) %}
-{%   set do_rels = p.update_sections.relationships and (apl.relationships | default([]) | length > 0) %}
-{%   set do_shut = p.update_sections.shutdown | default(false) and (apl.shutdown | default([]) | length > 0) %}
-{%   if do_info or do_rels or do_shut %}
+{#
+  UPD sections: the file's APG first (update_sections.apg), then each APL.
+  Sections in the order of a dialog export.
+#}
+{% for e in ([p.apg] if has_apg else []) + p.apls %}
+{%   set is_apg = has_apg and loop.first %}
+{%   set has_long = e.long_description | default([]) | length > 0 %}
+{%   set has_rels = e.relationships | default([]) | length > 0 %}
+{%   if is_apg %}
+{%     set do_desc = (us.apg | default(false)) and (has_long or (upd_only and e.description | default('') | length > 0)) %}
+{%     set do_grp = (us.apg | default(false)) and ((e.automation_name | default('') | length > 0) or (e.behavior | default('') | length > 0) or (e.automatically_link | default('') | string | length > 0)) %}
+{%     set do_rels = (us.apg | default(false)) and has_rels %}
+{%     set do_info = false %}
+{%     set do_msgs = false %}
+{%     set do_start = false %}
+{%     set do_shut = false %}
+{%     set do_db2 = false %}
+{%   else %}
+{%     set do_desc = (us.description | default(false)) and (has_long or (upd_only and e.description | default('') | length > 0)) %}
+{%     set do_grp = false %}
+{%     set do_info = (us.application_info | default(false)) and ((e.command_prefix | default('') | length > 0) or (e.restart_after_ipl | default('') | length > 0) or (e.external_startup | default('') | length > 0) or (e.external_shutdown | default('') | length > 0) or (e.skip_active_status | default('') | string | length > 0)) %}
+{%     set do_rels = (us.relationships | default(false)) and has_rels %}
+{%     set do_msgs = (us.messages | default(false)) and (e.messages | default([]) | length > 0) %}
+{%     set do_start = (us.startup | default(false)) and (e.startup | default([]) | length > 0) %}
+{%     set do_shut = (us.shutdown | default(false)) and (e.shutdown | default([]) | length > 0) %}
+{%     set do_db2 = (us.db2_control | default(false)) and (e.db2_control is defined) %}
+{%   endif %}
+{%   if do_desc or do_grp or do_info or do_rels or do_msgs or do_start or do_shut or do_db2 %}
 
-UPD APL             : {{ apl.name }}
+UPD {{ 'APG' if is_apg else 'APL' }}             : {{ e.name }}
 {#   Field replacement: only the fields listed here change; the others keep
      their value (field names as in a dialog export). #}
+{%     if do_desc %}
+ DESCRIPTION (FIELD)
+{%       if upd_only and e.description | default('') | length > 0 %}
+{{ kv('Short Description', e.description, 3, 25) }}
+{%       endif %}
+{%       for line in e.long_description | default([]) %}
+{{ kv('Long Description ' ~ loop.index, line, 3, 25) }}
+{%       endfor %}
+{%     endif %}
+{%     if do_grp %}
+ APPLGROUP INFO (FIELD)
+{%       if e.automation_name | default('') | length > 0 %}
+{{ kv('Automation Name', e.automation_name, 3, 25) }}
+{%       endif %}
+{%       if e.behavior | default('') | length > 0 %}
+{{ kv('Behavior', e.behavior, 3, 25) }}
+{%       endif %}
+{%       if e.automatically_link | default('') | string | length > 0 %}
+{{ kv('Automatically link', yn(e.automatically_link), 3, 25) }}
+{%       endif %}
+{%     endif %}
 {%     if do_info %}
  APPLICATION INFO (FIELD)
-{%       if apl.restart_after_ipl | default('') | length > 0 %}
-{{ kv('Restart after IPL', apl.restart_after_ipl, 3, 25) }}
+{%       if e.restart_after_ipl | default('') | length > 0 %}
+{{ kv('Restart after IPL', e.restart_after_ipl, 3, 25) }}
 {%       endif %}
-{%       if apl.command_prefix | default('') | length > 0 %}
-{{ kv('Command Prefix', apl.command_prefix, 3, 25) }}
+{%       if e.external_startup | default('') | length > 0 %}
+{{ kv('External Startup', e.external_startup, 3, 25) }}
+{%       endif %}
+{%       if e.external_shutdown | default('') | length > 0 %}
+{{ kv('External Shutdown', e.external_shutdown, 3, 25) }}
+{%       endif %}
+{%       if e.command_prefix | default('') | length > 0 %}
+{{ kv('Command Prefix', e.command_prefix, 3, 25) }}
+{%       endif %}
+{%       if e.skip_active_status | default('') | string | length > 0 %}
+{{ kv('Skip ACTIVE status', yn(e.skip_active_status), 3, 25) }}
 {%       endif %}
 {%     endif %}
 {#   Layout from SINGSAMP(INGEFUJ3): each relationship is exactly 7 data
      lines in this order (empty values allowed), separated by a "*" line.
-     "policy replacement" replaces all relationships of the APL. #}
+     "policy replacement" replaces all relationships of the APL or APG. #}
 {%     if do_rels %}
   RELATIONSHIPS                      ( policy replacement )
-{%       for rel in apl.relationships %}
+{%       for rel in e.relationships %}
 {%         if not loop.first %}
 *
 {%         endif %}
@@ -74,15 +151,84 @@ UPD APL             : {{ apl.name }}
 {{ kv('Condition', rel.condition | default(''), 4, 37) }}
 {%       endfor %}
 {%     endif %}
-{#   Layout from a dialog export of APL CICS0001 (Data Management, Update via
-     File, option 1): separator in column 42 at every level, "Action - CMD"
-     with a dash, then Pass / Automated Function/'*' / Command Text per pass.
-     "block replacement" replaces the APL's shutdown commands. #}
+{#   MESSAGES/USER DATA, STARTUP and SHUTDOWN: layout of a dialog export
+     (Data Management, Update via File, option 1): separator in column 42
+     at every level, "Action - <type>" with a dash, every field of an action
+     entry written in export order (empty values allowed).  "block
+     replacement" replaces the APL's whole block. #}
+{%     if do_msgs %}
+  MESSAGES/USER DATA                     ( block replacement )
+{%       for m in e.messages %}
+{{ kv('Message ID', m.id, 4, 41) }}
+{{ kv('Description', m.description | default(''), 6, 41) }}
+{%         if (m.cmd | default([]) | length > 0) or (m.user | default([]) | length > 0) %}
+{{ kv('Mixed case', yn(m.mixed_case | default('')), 6, 41) }}
+{%         endif %}
+{%         if m.cmd | default([]) | length > 0 %}
+      {{ '%-35s' | format('Action') }}- CMD
+{%           for c in m.cmd %}
+{{ kv('Pass/Selection', c.selection | default(''), 8, 41) }}
+{{ kv("Automated Function/'*'", c.function | default(''), 8, 41) }}
+{{ kv('Command Text', c.command, 8, 41) }}
+{%           endfor %}
+{%         endif %}
+{%         if m.reply | default([]) | length > 0 %}
+      {{ '%-35s' | format('Action') }}- REPLY
+{%           for r in m.reply %}
+{{ kv('Pass/Selection', r.selection | default(''), 8, 41) }}
+{{ kv('Retry Count', r.retry | default(''), 8, 41) }}
+{{ kv('Reply Text', r.text, 8, 41) }}
+{%           endfor %}
+{%         endif %}
+{%         if m.code | default([]) | length > 0 %}
+      {{ '%-35s' | format('Action') }}- CODE
+{%           for c in m.code %}
+{{ kv('Code 1', c.code1 | default(''), 8, 41) }}
+{{ kv('Code 2', c.code2 | default(''), 8, 41) }}
+{{ kv('Code 3', c.code3 | default(''), 8, 41) }}
+{{ kv('Value Returned', c.value, 8, 41) }}
+{%           endfor %}
+{%         endif %}
+{%         if m.user | default([]) | length > 0 %}
+      {{ '%-35s' | format('Action') }}- USER
+{%           for u in m.user %}
+{{ kv('Keyword', u.keyword, 8, 41) }}
+{{ kv('Data', u.data | default(''), 8, 41) }}
+{%           endfor %}
+{%         endif %}
+{%         if m.at is defined %}
+      {{ '%-35s' | format('Action') }}- AT
+{{ kv('Ignore for AT', '', 8, 41) }}
+{{ kv('AT message placement', '', 8, 41) }}
+{{ kv('AT check for message id', '', 8, 41) }}
+{{ kv('AT ignore message id characters', '', 8, 41) }}
+{{ kv('AT additional condition', '', 8, 41) }}
+{{ kv('AT application status', m.at.status | default(''), 8, 41) }}
+{{ kv('AT monitor status', m.at.monitor_status | default(''), 8, 41) }}
+{{ kv('AT Capture message selection', m.at.capture | default(''), 8, 41) }}
+{{ kv('AT Capture message DOM option', '', 8, 41) }}
+{{ kv('AT override', '', 8, 41) }}
+{%         endif %}
+{%       endfor %}
+{%     endif %}
+{%     if do_start %}
+  STARTUP                                ( block replacement )
+{%       for ph in e.startup %}
+{{ kv('Phase', ph.phase, 4, 41) }}
+{{ kv('Mixed case', yn(ph.mixed_case | default('')), 6, 41) }}
+      {{ '%-35s' | format('Action') }}- CMD
+{%         for c in ph.commands %}
+{{ kv('Type', c.type | default(''), 8, 41) }}
+{{ kv("Automated Function/'*'", c.function | default(''), 8, 41) }}
+{{ kv('Command Text', c.command, 8, 41) }}
+{%         endfor %}
+{%       endfor %}
+{%     endif %}
 {%     if do_shut %}
   SHUTDOWN                               ( block replacement )
-{%       for ph in apl.shutdown %}
+{%       for ph in e.shutdown %}
 {{ kv('Phase', ph.phase, 4, 41) }}
-{{ kv('Mixed case', ph.mixed_case | default(''), 6, 41) }}
+{{ kv('Mixed case', yn(ph.mixed_case | default('')), 6, 41) }}
       {{ '%-35s' | format('Action') }}- CMD
 {%         for ps in ph.passes %}
 {{ kv('Pass', ps.pass, 8, 41) }}
@@ -90,6 +236,19 @@ UPD APL             : {{ apl.name }}
 {{ kv('Command Text', ps.command, 8, 41) }}
 {%         endfor %}
 {%       endfor %}
+{%     endif %}
+{#   DB2 CONTROL: the 7 fields of a dialog export, only Subsystem ID and
+     Active Log Dataset filled.  Separator in column 34 so a 44-character
+     data set name fits.  "policy replacement" replaces the whole record. #}
+{%     if do_db2 %}
+  DB2 CONTROL                    ( policy replacement )
+{{ kv('Subsystem ID', e.db2_control.subsystem_id, 4, 33) }}
+{{ kv('Active Log Dataset', e.db2_control.active_log_dataset | default(''), 4, 33) }}
+{{ kv('Log Full Threshold', '', 4, 33) }}
+{{ kv('STOP Tablespace Delay', '', 4, 33) }}
+{{ kv('Active Log Alert', '', 4, 33) }}
+{{ kv('Log Alert Threshold', '', 4, 33) }}
+{{ kv('Log Offload Interval', '', 4, 33) }}
 {%     endif %}
 {%   endif %}
 {% endfor %}
