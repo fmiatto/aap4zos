@@ -139,10 +139,11 @@
       - item.skip_active_status is not defined or item.skip_active_status is boolean or item.skip_active_status in ['YES', 'NO']
       - item.relationships | default([]) | selectattr('type', 'undefined') | list | length == 0
       - item.relationships | default([]) | selectattr('resource', 'undefined') | list | length == 0
-      - item.startup | default([]) | map(attribute='phase') | reject('in', ['INIT', 'STARTUP', 'POSTSTART']) | list | length == 0
+      - item.startup | default([]) | map(attribute='phase') | reject('in', ['PRESTART', 'STARTUP', 'POSTSTART']) | list | length == 0
       - item.startup | default([]) | selectattr('commands', 'undefined') | list | length == 0
       - item.startup | default([]) | map(attribute='commands') | flatten | selectattr('command', 'undefined') | list | length == 0
-      - item.shutdown | default([]) | map(attribute='phase') | reject('in', ['NORM', 'IMMED', 'FORCE']) | list | length == 0
+      - item.shutdown | default([]) | map(attribute='phase') | reject('in', ['INIT', 'NORM', 'IMMED', 'FORCE']) | list | length == 0
+      - item.shutdown | default([]) | rejectattr('phase', 'equalto', 'INIT') | map(attribute='passes') | flatten | selectattr('pass', 'undefined') | list | length == 0
       - item.shutdown | default([]) | map(attribute='passes') | flatten | selectattr('command', 'undefined') | list | length == 0
       - sa_msgs | selectattr('id', 'undefined') | list | length == 0
       - sa_msgs | selectattr('id', 'equalto', 'CAPMSGS') | selectattr('code', 'defined') | list | length == 0
@@ -214,7 +215,7 @@
       {%-   endfor -%}
       {%-   for ph in e.shutdown | default([]) -%}
       {%-     for ps in ph.passes | default([]) -%}
-      {%-       for k, v in ps.items() -%}{{- chk(w ~ 'shutdown ' ~ ph.phase ~ ' pass ' ~ ps.pass ~ ' ' ~ k, v, w_blk) -}}{%- endfor -%}
+      {%-       for k, v in ps.items() -%}{{- chk(w ~ 'shutdown ' ~ ph.phase ~ ' ' ~ (ps.pass | default(ps.type | default(''))) ~ ' ' ~ k, v, w_blk) -}}{%- endfor -%}
       {%-     endfor -%}
       {%-   endfor -%}
       {%-   for mr in e.minor_resources | default([]) -%}

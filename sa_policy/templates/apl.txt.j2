@@ -295,8 +295,14 @@ UPD {{ 'APG' if is_apg else 'APL' }}             : {{ e.name }}
 {{ kv('Phase', ph.phase, 4, 41) }}
 {{ kv('Mixed case', yn(ph.mixed_case | default('')), 6, 41) }}
       {{ '%-35s' | format('Action') }}- CMD
+{#         INIT: commands run before the shutdown passes, per shutdown type
+           (Type) instead of a pass number. #}
 {%         for ps in ph.passes %}
+{%           if ph.phase == 'INIT' %}
+{{ kv('Type', ps.type | default(''), 8, 41) }}
+{%           else %}
 {{ kv('Pass', ps.pass, 8, 41) }}
+{%           endif %}
 {{ kv("Automated Function/'*'", ps.function | default(''), 8, 41) }}
 {{ kv('Command Text', ps.command, 8, 41) }}
 {%         endfor %}

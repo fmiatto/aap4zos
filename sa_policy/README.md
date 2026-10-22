@@ -1,11 +1,12 @@
 # SA z/OS policies with Ansible
 
-[playbooks/add_to_sa.yml](playbooks/add_to_sa.yml) defines classes, application groups (APGs)
-and applications (APLs) in the SA z/OS policy database (PDB), builds the configuration and
-activates it on the running system. The entries are described in YAML files under
-`vars/policies/`; the playbook turns them into one SA text file ("Making Updates with Text
-Files"), applies it with SA's batch text-file update, runs a full build and loads the new
-configuration.
+[playbooks/sa_policy.yml](playbooks/sa_policy.yml) adds, updates and deletes classes,
+application groups (APGs) and applications (APLs) in the SA z/OS policy database (PDB), builds
+the configuration and activates it on the running system. The entries are described in YAML
+files under `vars/policies/`; the playbook turns them into one SA text file ("Making Updates
+with Text Files"), applies it with SA's batch text-file update, runs a full build and loads the
+new configuration. The same policy file that adds entries also deletes them
+([Deleting entries](#deleting-entries)).
 
 The normal run works straight on the live PDB and the live configuration, with no backups or
 approvals. To try something first, the same run can work on a copy of the PDB instead
@@ -13,12 +14,13 @@ approvals. To try something first, the same run can work on a copy of the PDB in
 
 | Path | What it is |
 |---|---|
-| `playbooks/add_to_sa.yml` | The playbook: stages apply, build, activate |
+| `playbooks/sa_policy.yml` | The playbook: adds, updates and deletes entries; stages apply, build, activate |
 | `vars/sa_env.yml` | The target system: PDB, configuration GDG, libraries, work data sets, jobs |
 | `vars/policies/*.yml` | One policy file per set of entries |
-| `templates/apl.txt.j2` | Writes the SA text file from a policy file |
+| `templates/apl.txt.j2` | Writes the NEW / UPD sections of a policy file |
+| `templates/delete.txt.j2` | Writes the DEL sections of a policy file |
 | `templates/textupd.jcl.j2`, `ingebbld.jcl.j2`, `newgen.jcl.j2`, `jobcard.j2` | Batch jobs: text-file update, build, new configuration generation |
-| `roles/sa_policy_common/tasks/` | `render.yml` / `render_one.yml` (check and render the policies), `run_job.yml` (submit a job and check its output) |
+| `roles/sa_policy_common/tasks/` | `render.yml` (all policies into one text file), `render_one.yml` / `render_delete.yml` (check and render one policy to add / to delete), `run_job.yml` (submit a job and check its output) |
 | `SA_Helpful_Commands.md` | SA display commands and where to find SA's own data |
 
 ## Requirements
@@ -36,7 +38,8 @@ approvals. To try something first, the same run can work on a copy of the PDB in
 
 | Variable | Value | Meaning |
 |---|---|---|
-| `sa_policies` | `db2-dba1`, `cics62`, `rmf`, `mq1` | Policy files to process, in order (names in `vars/policies/` without `.yml`) |
+| `sa_policies` | `db2-dba1`, `cics62`, `rmf`, `mq1` | Policy files to add (or update), in order (names in `vars/policies/` without `.yml`) |
+| `sa_policies_delete` | `[]` | Policy files whose entries are deleted ([Deleting entries](#deleting-entries)) |
 | `sa_proc` | `AUTOPROC` | SA agent STC (`F AUTOPROC,...`) |
 | `sa_pdb_name` / `sa_pdb_dsn` | `LTEPLEX_PDB` / `SYSAUTO.PDB` | Policy database |
 | `sa_config_gdg_base` | `SYSAUTO.PDB.SOCNTL` | Configuration GDG SA loads |
@@ -44,7 +47,7 @@ approvals. To try something first, the same run can work on a copy of the PDB in
 | `sa_dialog_hlq` / `sa_ispf_hlq` | `SYS1.ING` / `SYS1.ISP` | SA dialog and ISPF libraries |
 | `sa_work_hlq` | `SYSAUTO.PROTO` | Work data sets: JCL (`.SAPDB.WORK`), text file (`.SAPDB.WORK.UPD`), update report (`.SAPDB.WORK.RPT`), build output (`.SAPDB.SOCNTL`) |
 | `sa_text_lrecl` | `255` | Longest text-file line. 255 is SA's own maximum; the text file is VB, so lines are not padded |
-| `sa_job` | class `A`, msgclass `X` | Job card |
+| `sa_job` | prefix `SA`, class `A`, msgclass `X` | Job card; the jobs are `SATXUPD` (text-file update), `SABUILD`, `SANEWGEN` |
 
 `sa_textupd` and `sa_build` hold the DDs and commands of IBM's samples `SINGSAMP(INGEBFLT)`
 (text-file update) and `SINGSAMP(INGEBBLD)` (build).
@@ -53,7 +56,8 @@ Variables given only with `-e`:
 
 | Variable | Meaning |
 |---|---|
-| `sa_policies=a,b` | Process these policy files instead of the list above |
+| `sa_policies=a,b` | Add these policy files instead of the list above (`sa_policies=` for none) |
+| `sa_policies_delete=a,b` | Delete the entries of these policy files instead of the list above |
 | `sa_update_only=true` | Make every policy file update-only |
 | `sa_test_pdb=<dsn>` | Work on a copy of the PDB ([Test PDB](#test-pdb)) |
 | `sa_test_pdb_refresh=true` | Copy the live PDB into the test PDB again before apply |
@@ -68,11 +72,11 @@ Variables given only with `-e`:
 | [rmf.yml](vars/policies/rmf.yml) | Update-only: Restart after IPL `START` on the existing APL `RMF` |
 | [mq1.yml](vars/policies/mq1.yml) | APG `MQ1_MQ`: IBM MQ queue manager, channel initiator and web console, with their own start and stop commands and messages |
 | [ims15.yml](vars/policies/ims15.yml) | The IMS classes and APG `IMS15`: IMS DB/DC with IRLM, CSL (SCI, OM, RM, RS), DLISAS, DBRC, dependent regions and IMS Connect. Not in `sa_policies` (IMS is not installed on LTE1) |
-| [syntax-test.yml](vars/policies/syntax-test.yml) | Test PDB only: two classes and an APL using every section the template writes |
-| [syntax-test-thresholds.yml](vars/policies/syntax-test-thresholds.yml) | Test PDB only, update-only: APL thresholds on the syntax-test APL |
+| [example-add.yml](vars/policies/example-add.yml) | Test PDB only: every field the playbook can write (two classes, an APG, two APLs), to add and to update |
+| [example-delete.yml](vars/policies/example-delete.yml) | Test PDB only: the minimal file to delete classes, an APG and APLs (the `example-add` entries) |
 
-All files of a run go into one text file, applied in one job, then one build and one
-activation. SA checks the whole text file before it writes anything: if any part has an
+All files of a run, to delete and to add, go into one text file, applied in one job, then one
+build and one activation. SA checks the whole text file before it writes anything: if any part has an
 error, nothing is written. A file whose entries refer to another file's entries (a class, an
 APG in a relationship) comes after that file in `sa_policies`.
 
@@ -159,10 +163,10 @@ A class is an APL entry with object type CLASS. APLs (and other classes) link to
 
 ```yaml
   classes:
-    - name: C_SAT_CHILD
-      subsystem: C_SAT_CHD
-      description: Syntax test - child class
-      link_to_class: C_SAT_BASE
+    - name: C_EX_CHILD
+      subsystem: C_EX_CHD
+      description: Example - child class
+      link_to_class: C_EX_BASE
       skip_active_status: "YES"
 ```
 
@@ -205,13 +209,16 @@ with its own commands after its parent uses a plain `HASPARENT`.
 
 ```yaml
       startup:
-        - phase: STARTUP                    # INIT | STARTUP | POSTSTART
+        - phase: STARTUP                    # PRESTART | STARTUP | POSTSTART
           mixed_case: "NO"                  # optional
           commands:
             - { command: "MVS &SUBSCMDPFX START QMGR" }
             - { type: COLD, command: "MVS S &SUBSJOB,PARM=COLD" }   # type: start type, empty = all
       shutdown:
-        - phase: NORM                       # NORM | IMMED | FORCE
+        - phase: INIT                       # before the passes, per shutdown type
+          passes:
+            - { type: NORM, command: "INGDB2 CHECK_INDOUBT,&SUBSAPPL" }
+        - phase: NORM                       # NORM | IMMED | FORCE: numbered passes
           mixed_case: "NO"                  # optional
           passes:
             - { pass: 1, command: "MVS F &SUBSJOB,CEMT P SHUT" }
@@ -236,12 +243,12 @@ Each message has an `id`, an optional `description` and any of these actions:
           code: [{ code1: "*DSNDB01*", code2: "*", code3: BATCH, value: RECOVER }]
         - id: CICSINFO
           user: [{ keyword: CICSCMD, data: "('ACTIVE TASKS','CEMT I TA')" }]
-        - id: SATM002I
+        - id: EXM002I
           at:
             override:                       # AT override: one list entry per line
-              - "IF MSGID = 'SATM002I' THEN BEGIN;"
+              - "IF MSGID = 'EXM002I' THEN BEGIN;"
               - "  ALWAYS"
-              - "  EXEC(CMD('INGMON SATAPL1,STATUS=NORMAL')ROUTE(ONE %AOFOPGSSOPER%));"
+              - "  EXEC(CMD('INGMON EXAPL1,STATUS=NORMAL')ROUTE(ONE %AOFOPGSSOPER%));"
               - "END;"
         - id: CAPMSGS                       # message capturing: capture: instead of code:
           capture:
@@ -249,11 +256,20 @@ Each message has an `id`, an optional `description` and any of these actions:
               # also: user, inform_list, comment_type, comment_text, dom_list
 ```
 
-AT keys and their export field names: `ignore` (Ignore for AT), `placement` (AT message
-placement), `check_msgid` (AT check for message id), `ignore_chars` (AT ignore message id
-characters), `condition` (AT additional condition, e.g. `"HDRMTYPE = '>'"`), `status` (AT
-application status), `monitor_status` (AT monitor status), `capture` (AT Capture message
-selection), `dom_option` (AT Capture message DOM option), `override` (AT override).
+AT keys:
+
+| Key | Field | Values (examples) |
+|---|---|---|
+| `status` | AT application status | `UP`, ... |
+| `monitor_status` | AT monitor status | `CHECK`, ... |
+| `capture` | AT Capture message selection | `SELECTED` |
+| `condition` | AT additional condition (added to the AT condition) | `"HDRMTYPE = '>'"` |
+| `check_msgid` | AT check for message id | `"NO"`: no `IF MSGID =` test (put it in `condition`) |
+| `ignore_chars` | AT ignore message id characters | `LEADING`: `IF MSGID = . 'id'` |
+| `placement` | AT message placement | `BOTTOM` (end of the AT) |
+| `ignore` | Ignore for AT | `"YES"`: no AT entry for the message |
+| `dom_option` | AT Capture message DOM option | |
+| `override` | AT override | list of lines, max 72 each |
 
 The `messages` part replaces all messages of the entry. The build puts the AT entries into
 `ACFMZ999` and the message IDs into `MPFLSTSA`; they take effect only if NetView loads that
@@ -309,6 +325,9 @@ checks its own limits again in the update report and writes nothing when one is 
   `sa_text_lrecl`;
 - a `sa_test_only` file runs without `sa_test_pdb`.
 
+`render_delete.yml` stops the run when a file in `sa_policies_delete` is update-only, names no
+entry (or keeps them all), or has an invalid name.
+
 YAML reads unquoted `YES` / `NO` as booleans; the template writes them back as `YES` / `NO`,
 so both forms work.
 
@@ -317,20 +336,20 @@ so both forms work.
 All policies in `sa_policies`:
 
 ```bash
-ansible-playbook -i sa_policy/inventory/local/inventory.yml sa_policy/playbooks/add_to_sa.yml
+ansible-playbook -i sa_policy/inventory/local/inventory.yml sa_policy/playbooks/sa_policy.yml
 ```
 
 Only some of them (comma-separated, in order):
 
 ```bash
-ansible-playbook -i sa_policy/inventory/local/inventory.yml sa_policy/playbooks/add_to_sa.yml -e sa_policies=db2-dba1,rmf
+ansible-playbook -i sa_policy/inventory/local/inventory.yml sa_policy/playbooks/sa_policy.yml -e sa_policies=db2-dba1,rmf
 ```
 
 | Stage | What it does |
 |---|---|
-| apply | Renders the policies with `templates/apl.txt.j2` into one text file (`<work>.SAPDB.WORK.UPD`, VB, lines up to 255), runs the text-file update against the PDB and prints SA's update report |
+| apply | Renders the policies into one text file (`<work>.SAPDB.WORK.UPD`, VB, lines up to 255): the DEL sections of `sa_policies_delete`, then the NEW / UPD sections of `sa_policies`. Runs the text-file update against the PDB and prints SA's update report |
 | build | Full build of the PDB into an empty `<work>.SAPDB.SOCNTL` |
-| activate | IEBCOPY of the build into `<GDG>(+1)` (allocated like the active generation), `INGAMS REFRESH CFG=<new generation>`, waits until `ACF STATUS` shows it, `INGLIST` of the new APGs and APLs |
+| activate | IEBCOPY of the build into `<GDG>(+1)` (allocated like the active generation), `INGAMS REFRESH CFG=<new generation>`, waits until `ACF STATUS` shows it, `INGLIST` of the new APGs and APLs, and lists the deleted entries |
 
 Run one or more stages with `--tags apply`, `--tags build`, `--tags activate` (or
 `--tags apply,build`). Rendering and the checks run in every stage, and with any other tag
@@ -338,6 +357,50 @@ Run one or more stages with `--tags apply`, `--tags build`, `--tags activate` (o
 
 `-e sa_update_only=true` makes every listed policy update-only, to change entries that already
 exist.
+
+### Deleting entries
+
+List a policy file in `sa_policies_delete` (or `-e sa_policies_delete=...`) and the run deletes
+every entry it defines; only the names are used, so the file that added the entries deletes
+them too:
+
+```bash
+ansible-playbook -i sa_policy/inventory/local/inventory.yml sa_policy/playbooks/sa_policy.yml -e sa_policies= -e sa_policies_delete=mq1
+```
+
+The text file gets, per file and before any NEW / UPD section:
+
+```text
+DEL APL             : <each APL>
+DEL APG             : <the APG>
+DEL APL             : <each class, from the last to the first>
+```
+
+Classes are deleted last and in reverse, because a policy file lists parent classes first.
+The smallest file that deletes a class, an APG and an APL is
+[example-delete.yml](vars/policies/example-delete.yml):
+
+```yaml
+sa_new_policy:
+  classes:
+    - name: C_EX_BASE
+    - name: C_EX_CHILD
+  apg:
+    name: EX_GROUP
+  apls:
+    - name: EXAPL1
+    - name: EXAPL2
+```
+
+- `keep_on_delete: true` on an entry leaves it out of the delete.
+- **A class is deleted even while other APLs link to it**: SA unlinks them without a warning
+  and they lose the policy they inherited (start and stop commands, messages). Mark classes
+  that other policy files still use with `keep_on_delete: true` (for example the shared
+  `C_IMS_*` classes of `ims15.yml` when another IMS uses them).
+- Deleting an entry that is not in the PDB fails with `... does not exist in Policy
+  Database`; SA then writes nothing, as with a full add of an entry that exists.
+- A file in both lists is deleted and created again in the same run.
+- Update-only files (as `rmf.yml`) cannot be listed: they change entries they do not own.
 
 A job fails the run on a completion code above its `max_rc` or on an `ERROR` / `WARNING` line
 in its output (`sa_fail_message_regex`). Its ISPLOG and SYSTSPRT are printed when it fails;
@@ -350,7 +413,7 @@ SA clears Automation and Chaining on HASPARENT relationships).
 works on `sa_pdb_dsn`:
 
 ```bash
-ansible-playbook -i sa_policy/inventory/local/inventory.yml sa_policy/playbooks/add_to_sa.yml -e sa_test_pdb=SYSAUTO.PROTO.TESTPDB -e sa_policies=syntax-test --tags apply,build
+ansible-playbook -i sa_policy/inventory/local/inventory.yml sa_policy/playbooks/sa_policy.yml -e sa_test_pdb=SYSAUTO.PROTO.TESTPDB -e sa_test_pdb_refresh=true -e sa_policies=example-add --tags apply,build
 ```
 
 - apply copies the live PDB into `<dsn>` when `<dsn>` does not exist, or every time with
@@ -362,9 +425,11 @@ ansible-playbook -i sa_policy/inventory/local/inventory.yml sa_policy/playbooks/
   changes in the live PDB's change log (`SYSAUTO.PDB.LOG1` / `LOG2`). The live policy itself
   is not touched.
 
-`syntax-test.yml`, then `syntax-test-thresholds.yml`, exercise every section the template
-writes; after their build, the members of `<dsn>.SOCNTL` named in the build report
-(`$BLDRPT`) show what SA made of each entry.
+The examples run on the test PDB in this order: add (`-e sa_policies=example-add`, with
+`-e sa_test_pdb_refresh=true` for a fresh copy), update (the same with
+`-e sa_update_only=true`), delete (`-e sa_policies= -e sa_policies_delete=example-delete`).
+After a build, the members of `<dsn>.SOCNTL` named in the build report (`$BLDRPT`) show what SA
+made of each entry, and `ACFMZ999` holds the AT entries.
 
 ## Notes
 
@@ -381,7 +446,8 @@ writes; after their build, the members of `<dsn>.SOCNTL` named in the build repo
 - Values longer than a 255-character text-file line.
 - Policy items: AUTOMATION FLAGS, APPLICATION SYMBOLS, CICS / IMS CONTROL, and minor-resource
   policies other than thresholds.
-- Deleting entries.
+- Deleting single policy items (one message, one relationship): change the entry with an
+  update instead (block and policy replacement replace the whole item).
 
 ## Other playbooks
 

@@ -1,21 +1,28 @@
 ---
 # =============================================================================
-# Playbook : add_to_sa.yml
-# Purpose  : Add the policies listed in sa_policies (vars/policies/*.yml) to
-#            SA z/OS and make them active, straight away:
+# Playbook : sa_policy.yml
+# Purpose  : Add, update and delete SA z/OS policy entries (classes, APGs,
+#            APLs) described in vars/policies/*.yml, build the configuration
+#            and make it active, straight away:
+#              sa_policies         files whose entries are added (or, for
+#                                  update-only files, updated)
+#              sa_policies_delete  files whose entries are deleted
+#            Stages:
 #              apply    - render all policies into one text file (VB, lines
-#                         up to sa_text_lrecl) and apply it to the PDB
+#                         up to sa_text_lrecl; deletes first, then adds and
+#                         updates) and apply it to the PDB
 #                         (SINGSAMP(INGEBFLT), AOFFBFL1)
 #              build    - full build of the PDB (SINGSAMP(INGEBBLD), AOFFBBL1)
 #              activate - copy the build into a new generation of the
 #                         configuration GDG and INGAMS REFRESH to it
 #            Run one stage alone with --tags apply|build|activate.
-#            Choose policies with -e sa_policies=db2-dba1,cics62,rmf.
+#            Choose policies with -e sa_policies=db2-dba1,cics62,rmf and
+#            -e sa_policies_delete=ims15.
 #            Test on a copy of the PDB with -e sa_test_pdb=<dsn> (apply and
 #            build only; see vars/sa_env.yml).
 #            System values: vars/sa_env.yml.  Documentation: README.md.
 # =============================================================================
-- name: SA | Add policies to System Automation, build and activate
+- name: SA | Add, update and delete SA policy entries, build and activate
   hosts: zos_host
   environment: "{{ environment_vars }}"
   gather_facts: false
@@ -273,6 +280,7 @@
             msg: >-
               {{ ['Previous configuration: ' ~ sa_active_config_dsn,
                   'Active configuration  : ' ~ sa_new_cfg]
+                 + (['Deleted: ' ~ (sa_deleted_names | join(', '))] if sa_deleted_names | length > 0 else [])
                  + (sa_refresh.stdout_lines | select('search', 'ING[0-9]+') | list)
                  + (sa_inglist.results | map(attribute='stdout_lines') | flatten
                     | select('search', '^\s+[A-Z0-9@#$_]+\s+(APG|APL)\s') | list) }}

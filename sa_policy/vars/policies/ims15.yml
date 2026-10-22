@@ -7,7 +7,7 @@
 #           address spaces (job names = APL names), or try it on a test PDB:
 #
 #   ansible-playbook -i sa_policy/inventory/local/inventory.yml \
-#     sa_policy/playbooks/add_to_sa.yml \
+#     sa_policy/playbooks/sa_policy.yml \
 #     -e sa_test_pdb=SYSAUTO.PROTO.TESTPDB -e sa_policies=ims15 \
 #     --tags apply,build
 #
@@ -22,6 +22,9 @@
 #   └ C_IMS15_SUBORDINATES  control region (external startup/shutdown ALWAYS)
 #   C_IMS_GENERIC         IRLM, CSL (SCI, OM, RM, RS), IMS Connect: P / C
 #   C_IMS_FDBR            Fast DB Recovery regions (none in IMS15)
+#   Deleting this file (sa_policies_delete) deletes the shared C_IMS_*
+#   classes too; when another IMS uses them, mark them keep_on_delete: true
+#   first (SA unlinks the APLs of a deleted class without a warning).
 #
 # Start order (HASPARENT):
 #   BASE_SYS -> IMS15RL1 (IRLM), IMS15SCI

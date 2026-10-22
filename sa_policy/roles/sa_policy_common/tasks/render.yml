@@ -1,38 +1,57 @@
 ---
 # =============================================================================
-# render.yml - Render every policy in sa_policies (vars/policies/<name>.yml)
-#   with templates/apl.txt.j2 and join them, in list order, into one text
-#   file.
+# render.yml - Render the policies (vars/policies/<name>.yml) into one text
+#   file: first the DEL sections of every policy in sa_policies_delete
+#   (render_delete.yml, templates/delete.txt.j2), then the NEW / UPD
+#   sections of every policy in sa_policies (render_one.yml,
+#   templates/apl.txt.j2), each list in its order.  A policy in both lists
+#   is deleted and created again.
 #   Sets: sa_textfile        the combined text file
 #         sa_inglist_names   APGs created and all APLs (not classes), for the
 #                            final INGLIST
+#         sa_deleted_names   entries deleted
 #   Runs on the control node only: with any tag that is not a stage, the
 #   playbook renders and checks the policies without touching the system.
-#   sa_policies: a list, or a comma-separated string from -e.
+#   sa_policies / sa_policies_delete: a list, or a comma-separated string
+#   from -e (empty with -e sa_policies=).
 # =============================================================================
-- name: "SA | Policies to add"
+- name: "SA | Policies to add and to delete"
+  vars:
+    sa_add_in: "{{ sa_policies | default([], true) }}"
+    sa_del_in: "{{ sa_policies_delete | default([], true) }}"
   ansible.builtin.set_fact:
     sa_policy_list: >-
-      {{ (sa_policies.split(',') if sa_policies is string else sa_policies)
+      {{ (sa_add_in.split(',') if sa_add_in is string else sa_add_in)
+         | map('trim') | select | list }}
+    sa_policy_delete_list: >-
+      {{ (sa_del_in.split(',') if sa_del_in is string else sa_del_in)
          | map('trim') | select | list }}
     sa_textfile_parts: []
+    sa_textfile_del_parts: []
     sa_inglist_names: []
+    sa_deleted_names: []
 
 - name: "SA | At least one policy"
   ansible.builtin.assert:
-    that: sa_policy_list | length > 0
-    fail_msg: "sa_policies is empty."
+    that: (sa_policy_list + sa_policy_delete_list) | length > 0
+    fail_msg: "sa_policies and sa_policies_delete are both empty."
     quiet: true
 
-- name: "SA | Render each policy"
+- name: "SA | Render each policy to delete"
+  ansible.builtin.include_tasks: render_delete.yml
+  loop: "{{ sa_policy_delete_list }}"
+  loop_control:
+    loop_var: sa_policy_name
+
+- name: "SA | Render each policy to add"
   ansible.builtin.include_tasks: render_one.yml
   loop: "{{ sa_policy_list }}"
   loop_control:
     loop_var: sa_policy_name
 
-- name: "SA | Combine into one text file"
+- name: "SA | Combine into one text file (deletes first)"
   ansible.builtin.set_fact:
-    sa_textfile: "{{ sa_textfile_parts | join('\n\n') }}"
+    sa_textfile: "{{ (sa_textfile_del_parts + sa_textfile_parts) | join('\n\n') }}"
 
 # Text file records hold up to sa_text_lrecl (255) characters.
 - name: "SA | Check the text file layout"
@@ -41,6 +60,6 @@
     fail_msg: "Text file lines over {{ sa_text_lrecl }} columns: {{ sa_textfile.splitlines() | select('match', '^.{' ~ (sa_text_lrecl | int + 1) ~ ',}') | list }}"
     quiet: true
 
-- name: "SA | Policies: {{ sa_policy_list | join(', ') }}"
+- name: "SA | Delete: {{ sa_policy_delete_list | join(', ') or '-' }} | Add: {{ sa_policy_list | join(', ') or '-' }}"
   ansible.builtin.debug:
-    msg: "{{ sa_textfile.splitlines() | select('match', '^(NEW|UPD) ') | list }}"
+    msg: "{{ sa_textfile.splitlines() | select('match', '^(DEL|NEW|UPD) ') | list }}"

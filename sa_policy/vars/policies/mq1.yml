@@ -44,7 +44,7 @@ sa_new_policy:
       command_prefix: "+MQ1"
       # Commands and message texts: max 212 characters, replies 61.
       startup:
-        - phase: STARTUP              # INIT | STARTUP | POSTSTART
+        - phase: STARTUP              # PRESTART | STARTUP | POSTSTART
           mixed_case: "NO"
           commands:
             - { command: "MVS &SUBSCMDPFX START QMGR" }

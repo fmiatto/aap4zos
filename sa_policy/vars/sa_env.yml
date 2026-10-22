@@ -1,21 +1,29 @@
 ---
 # =============================================================================
 # File    : vars/sa_env.yml
-# Purpose : Everything add_to_sa.yml needs to know about the target system
+# Purpose : Everything sa_policy.yml needs to know about the target system
 #           (LTE1, SA 4.3).
 # =============================================================================
 
 # ---------------------------------------------------------------------------
 # Policies to process, in order: file names in vars/policies/ without .yml.
-# All of them go into one text file, one build and one activation.
+#   sa_policies          add (or, update-only files, update) their entries
+#   sa_policies_delete   delete every class, APG and APL the file defines
+#                        (except entries with keep_on_delete: true);
+#                        update-only files are refused
+# Both lists go into one text file (deletes first, then adds), one build and
+# one activation; a file in both lists is deleted and created again.
 # A file that refers to another file's entries (a class, an APG) comes after
-# it.  Override with -e sa_policies=cics62   or   -e sa_policies=db2-dba1,rmf
+# it.  Override with -e sa_policies=cics62 or -e sa_policies=db2-dba1,rmf,
+# -e sa_policies_delete=ims15; -e sa_policies= gives an empty list.
 # ---------------------------------------------------------------------------
 sa_policies:
   - db2-dba1
   - cics62
   - rmf
   - mq1
+
+sa_policies_delete: []
 
 # ---------------------------------------------------------------------------
 # SA z/OS on the target system
@@ -49,15 +57,15 @@ sa_dialog_libs:
 # ---------------------------------------------------------------------------
 # Work data sets (the playbook creates them)
 # ---------------------------------------------------------------------------
-sa_work_hlq: SYSAUTO.PROTO
-sa_work_pds: "{{ sa_work_hlq }}.SAPDB.WORK"        # JCL (FB 80)
-sa_source_dsn: "{{ sa_work_pds }}.UPD"             # text file, sequential VB
+sa_work_hlq: SYSAUTO.ANSIBLE
+sa_work_pds: "{{ sa_work_hlq }}.JCL"        # JCL (FB 80)
+sa_source_dsn: "{{ sa_work_hlq }}.UPD"             # text file, sequential VB
 # Longest text-file line.  255 is SA's own maximum for a text-file record.
 # The text file is VB, so lines are not padded with blanks (SA would count
 # the padding into AT override continuation lines, max 72 characters).
 sa_text_lrecl: 255
-sa_report_dsn: "{{ sa_work_pds }}.RPT"             # update report, PDS
-sa_build_dsn: "{{ sa_work_hlq }}.SAPDB.SOCNTL"     # build output, PDSE
+sa_report_dsn: "{{ sa_work_hlq }}.RPT"             # update report, PDS
+sa_build_dsn: "{{ sa_work_hlq }}.SOCNTL"     # build output, PDSE
 
 # ---------------------------------------------------------------------------
 # PDB and build output the jobs use: sa_pdb_dsn and sa_build_dsn, or with
@@ -66,7 +74,7 @@ sa_build_dsn: "{{ sa_work_hlq }}.SAPDB.SOCNTL"     # build output, PDSE
 #            time with -e sa_test_pdb_refresh=true) and updates <dsn>
 #   build    builds <dsn> into -e sa_test_build_dsn (default <dsn>.SOCNTL)
 #   activate refuses to run: a test build never goes into the GDG
-#   -e sa_test_pdb=SYSAUTO.PROTO.TESTPDB -e sa_policies=syntax-test
+#   -e sa_test_pdb=SYSAUTO.PROTO.TESTPDB -e sa_policies=example-add
 # ---------------------------------------------------------------------------
 sa_target_pdb_dsn: "{{ sa_test_pdb | default(sa_pdb_dsn, true) }}"
 sa_target_build_dsn: >-
@@ -75,11 +83,11 @@ sa_target_build_dsn: >-
 
 # ---------------------------------------------------------------------------
 # Batch jobs
-#   //SAPTXUPD JOB MSGCLASS=X,CLASS=A,NOTIFY=&SYSUID,
+#   //SATXUPD  JOB MSGCLASS=X,CLASS=A,NOTIFY=&SYSUID,
 #   //         REGION=0M,TIME=NOLIMIT
 # ---------------------------------------------------------------------------
 sa_job:
-  prefix: SAP                     # job name = prefix + step suffix, max 8 chars
+  prefix: SA                      # job name = prefix + TXUPD | BUILD | NEWGEN
   account: ''
   programmer: ''
   class: A

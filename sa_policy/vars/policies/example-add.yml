@@ -1,0 +1,264 @@
+---
+# =============================================================================
+# File    : vars/policies/example-add.yml   (sa_policies name: example-add)
+# Purpose : TEST PDB ONLY - every field sa_policy.yml can write, in one file:
+#           two classes (the second linked to the first), an APG and two
+#           APLs.  example-delete.yml deletes the same entries again.
+#
+#   Add:     ansible-playbook -i sa_policy/inventory/local/inventory.yml \
+#              sa_policy/playbooks/sa_policy.yml \
+#              -e sa_test_pdb=SYSAUTO.PROTO.TESTPDB -e sa_test_pdb_refresh=true \
+#              -e sa_policies=example-add --tags apply,build
+#   Update:  the same with -e sa_update_only=true (no refresh): the UPD
+#            sections only, on the entries the add created.
+#
+#           sa_test_only: true makes the run fail unless -e sa_test_pdb is set.
+#           The build report ($BLDRPT in <test pdb>.SOCNTL) names the
+#           members SA built for each entry; the AT entries are in ACFMZ999.
+# =============================================================================
+sa_test_only: true
+sa_update_only: false
+
+sa_new_policy:
+
+  # ---------------------------------------------------------------------------
+  # Classes: parents first.  A class takes the APL fields except job_name,
+  # job_type, apgs and db2_control.
+  # ---------------------------------------------------------------------------
+  classes:
+
+    - name: C_EX_BASE
+      subsystem: C_EX_BASE              # max 11; the build refers to the class by it
+      category: DB2
+      description: Example - base class
+      long_description:
+        - Base class of the example policy
+        - Commands, messages and thresholds for its APLs
+      external_startup: NEVER
+      external_shutdown: NEVER
+
+      messages:
+        # AT: application status
+        - id: EXM001I
+          description: Example resource is up
+          at: { status: UP }
+        # AT: override, one list entry per line (max 72 characters each)
+        - id: EXM002I
+          description: Example AT override
+          at:
+            override:
+              - "* Example: AT override written as continuation lines"
+              - "IF MSGID = 'EXM002I' THEN BEGIN;"
+              - "  ALWAYS"
+              - "  EXEC(CMD('INGMON EXAPL1,STATUS=NORMAL')ROUTE(ONE %AOFOPGSSOPER%));"
+              - "END;"
+        # AT: additional condition, monitor status, capture
+        - id: EXM003I
+          description: Example AT condition
+          at:
+            condition: "TOKEN(2) = 'READY'"
+            monitor_status: CHECK
+            capture: SELECTED
+        # AT: no MSGID check (the condition is the whole test), placement
+        - id: EXM004I
+          description: Example AT without MSGID check
+          at:
+            check_msgid: "NO"
+            condition: "MSGID = 'EXM004I' & TOKEN(2) = 'DONE'"
+            placement: BOTTOM
+            status: UP
+        # AT: match the message ID with leading characters ignored
+        - id: EXM005I
+          description: Example AT ignore message ID characters
+          at:
+            ignore_chars: LEADING
+            status: UP
+        # AT: left out of the automation table (REPLY still applies)
+        - id: EXM006A
+          description: Example reply, not in the AT
+          at: { ignore: "YES" }
+          reply:
+            - { text: "Y" }
+        # REPLY: selection (start type), retry count, reply text (max 61)
+        - id: EXM007A
+          description: Example reply
+          reply:
+            - { selection: COLD, retry: 3, text: "CONTINUE COLD" }
+            - { text: "CONTINUE" }
+        # CMD: selection (pass or start type), automated function, command
+        - id: EXM008I
+          description: Example command
+          mixed_case: "NO"
+          cmd:
+            - { selection: RECOVER, function: "*", command: "MVS F &SUBSJOB,RECOVER" }
+            - { command: "MVS F &SUBSJOB,STATUS" }
+        # CODE: code table (code1-3 match the message, value is returned)
+        - id: EXM009E
+          description: Example abend codes
+          code:
+            - { code1: "*", code2: S000, code3: U0020, value: ABENDING }
+            - { code1: "*", code2: "*", code3: "*", value: BREAKING }
+        # USER: keyword / data pairs
+        - id: EXINFO
+          description: Example user data
+          mixed_case: "NO"
+          user:
+            - { keyword: EXCMD, data: "('DISPLAY STATUS','F &SUBSJOB,STATUS')" }
+            - { keyword: OFFSET, data: "1" }
+
+      startup:
+        - phase: PRESTART
+          commands:
+            - { command: "MVS D A,&SUBSJOB" }
+        - phase: STARTUP
+          mixed_case: "NO"
+          commands:
+            # type: start type (empty = every type); commands up to 212 characters
+            - { type: NORM, command: "MVS S &SUBSJOB,PARM='EXAMPLE A START PARAMETER STRING THAT IS LONGER THAN EIGHTY COLUMNS IN THE TEXT FILE'" }
+            - { type: COLD, function: "*", command: "MVS S &SUBSJOB,PARM='COLD'" }
+        - phase: POSTSTART
+          commands:
+            - { command: "MVS F &SUBSJOB,STATUS" }
+
+      shutdown:
+        # INIT: before the shutdown passes, per shutdown type (no pass number)
+        - phase: INIT
+          passes:
+            - { type: NORM, command: "MVS F &SUBSJOB,PREPARE" }
+        - phase: NORM
+          mixed_case: "NO"
+          passes:
+            - { pass: 1, command: "MVS P &SUBSJOB" }
+            - { pass: 3, command: "MVS C &SUBSJOB" }
+        - phase: IMMED
+          passes:
+            - { pass: 1, function: "*", command: "MVS C &SUBSJOB" }
+        - phase: FORCE
+          passes:
+            - { pass: 1, command: "MVS FORCE &SUBSJOB,ARM" }
+
+      minor_resources:
+        - name: TRAN
+          thresholds:
+            critical_number: 2
+            critical_interval: "00:05:00"
+            frequent_number: 4
+            frequent_interval: "01:00:00"
+            infrequent_number: 5
+            infrequent_interval: "24:00:00"
+
+    - name: C_EX_CHILD
+      subsystem: C_EX_CHD
+      link_to_class: C_EX_BASE          # class linked to a class
+      category: DB2
+      subcategory: MSTR
+      description: Example - child class
+      restart_after_ipl: START
+      skip_active_status: "YES"
+      relationships:
+        - { type: HASPARENT, resource: TCPIP/APL/= }
+
+  # ---------------------------------------------------------------------------
+  # APG
+  # ---------------------------------------------------------------------------
+  apg:
+    name: EX_GROUP
+    type: SYSTEM                        # SYSTEM | SYSPLEX
+    nature: BASIC                       # BASIC | MOVE | SERVER
+    description: Example group
+    long_description:
+      - Group of the example policy
+    automation_name: EX_GROUP
+    behavior: ACTIVE                    # ACTIVE | PASSIVE
+    automatically_link: "YES"
+    systems:
+      - LTE1
+    relationships:
+      - { type: HASPARENT, resource: BASE_SYS/APG/= }
+
+  # ---------------------------------------------------------------------------
+  # APLs
+  # ---------------------------------------------------------------------------
+  apls:
+
+    # Every APL field.
+    - name: EXAPL1
+      subsystem: EXAPL1
+      job_name: EXAPL1
+      job_type: MVS                     # MVS | NONMVS | TRANSIENT
+      category: DB2
+      subcategory: MSTR
+      link_to_class: C_EX_CHILD
+      description: Example application
+      long_description:
+        - Example application on class C_EX_CHILD
+      command_prefix: "-EX01"
+      restart_after_ipl: START
+      external_startup: NEVER           # INITIAL | ALWAYS | NEVER
+      external_shutdown: NEVER          # FINAL | ALWAYS | NEVER
+      skip_active_status: "NO"
+      relationships:
+        - type: HASPARENT
+          resource: BASE_SYS/APG/=
+          description: Starts after the base system
+        - type: MAKEAVAILABLE
+          resource: JES2/APL/=
+          description: Needs JES2 available
+          automation: PASSIVE
+          chaining: WEAK
+          condition: WhenObservedAvailable
+      messages:
+        # CAPMSGS: message capturing (capture: instead of code:)
+        - id: CAPMSGS
+          description: Message capturing (example)
+          capture:
+            - { msgid: EXM100E, jobname: "*", severity: CRITICAL, alert: "YES" }
+            - { msgid: EXM101W, jobname: EXAPL1, user: "*", severity: IMPORTANT, alert: "NO" }
+        - id: EXM102A
+          description: Example reply at the 61-character limit
+          reply:
+            - { text: "CONTINUE THE EXAMPLE: A 61-CHARACTER REPLY, SA'S MAXIMUM ...." }
+      shutdown:
+        - phase: IMMED
+          passes:
+            - { pass: 1, command: "MVS F &SUBSJOB,STOP IMMEDIATE WITH A COMMAND TEXT LONGER THAN EIGHTY COLUMNS IN THE FILE" }
+            - { pass: 2, command: "MVS C &SUBSJOB" }
+      thresholds:                       # number (0-999) of errors within hh:mm:ss
+        critical_number: 3
+        critical_interval: "00:10:00"
+        frequent_number: 3
+        frequent_interval: "01:00:00"
+        infrequent_number: 3
+        infrequent_interval: "12:00:00"
+      db2_control:
+        subsystem_id: EX01
+        active_log_dataset: EX01.LOGCOPY1.DS01
+
+    # Started and stopped by EXAPL1: StartsMeAndStopsMe needs external
+    # startup / shutdown (from a class, or here for an APL without a class).
+    - name: EXAPL2
+      subsystem: EXAPL2
+      job_name: EXAPL2
+      job_type: MVS
+      category: DB2
+      subcategory: DIST
+      description: Example application started by EXAPL1
+      apgs: [EX_GROUP]                  # default: the file's APG; [] for none
+      external_startup: ALWAYS
+      external_shutdown: ALWAYS
+      relationships:
+        # sequence 1: the parent whose values &SUBP... (command prefix, ...) use
+        - { type: HASPARENT, resource: EXAPL1/APL/=, sequence: 1, condition: StartsMeAndStopsMe }
+
+  # Every UPD part on (left out = off).
+  update_sections:
+    apg: true
+    description: true
+    application_info: true
+    relationships: true
+    messages: true
+    startup: true
+    shutdown: true
+    thresholds: true
+    minor_resources: true
+    db2_control: true

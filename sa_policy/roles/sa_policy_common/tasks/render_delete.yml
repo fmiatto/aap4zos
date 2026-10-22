@@ -1,0 +1,53 @@
+---
+# =============================================================================
+# render_delete.yml - Load vars/policies/<sa_policy_name>.yml, check it and
+#   render its DEL sections with templates/delete.txt.j2: every class, APG
+#   and APL the file defines, except entries with keep_on_delete: true.
+#   Called by render.yml per policy in sa_policies_delete.
+#   An update-only file is refused: it describes changes to entries it does
+#   not own.  A file with sa_test_only: true runs only against a test PDB.
+# =============================================================================
+- name: "SA | Load policy {{ sa_policy_name }} (delete)"
+  ansible.builtin.include_vars:
+    file: "{{ playbook_dir }}/../vars/policies/{{ sa_policy_name }}.yml"
+    name: sa_del
+
+# The entries to delete: every APL, the APG and every class of the file,
+# without those that set keep_on_delete: true.
+- name: "SA | {{ sa_policy_name }} (delete): entries"
+  vars:
+    sa_del_all: >-
+      {{ (sa_del.sa_new_policy.apls | default([]))
+         + ([sa_del.sa_new_policy.apg] if sa_del.sa_new_policy.apg is defined else [])
+         + (sa_del.sa_new_policy.classes | default([])) }}
+  ansible.builtin.set_fact:
+    sa_del_policy: "{{ sa_del.sa_new_policy }}"
+    sa_del_names: >-
+      {{ (sa_del_all | selectattr('keep_on_delete', 'undefined') | list
+          + (sa_del_all | selectattr('keep_on_delete', 'defined') | rejectattr('keep_on_delete') | list))
+         | map(attribute='name') | list }}
+
+- name: "SA | {{ sa_policy_name }} (delete): checks"
+  ansible.builtin.assert:
+    that: item.ok
+    fail_msg: "{{ sa_policy_name }} (sa_policies_delete): {{ item.msg }}"
+    quiet: true
+  loop:
+    - ok: "{{ not (sa_del.sa_update_only | default(false) | bool) }}"
+      msg: "update-only file (sa_update_only): it changes entries it does not own, so it is never deleted."
+    - ok: "{{ sa_del_names | length > 0 }}"
+      msg: "no entry to delete (every entry has keep_on_delete: true, or the file names none)."
+    - ok: "{{ sa_del_names | select('match', '^[A-Z@#$][A-Z0-9@#$_]{0,19}$') | list | length == sa_del_names | length }}"
+      msg: "invalid entry name in {{ sa_del_names }}."
+    - ok: "{{ sa_target_pdb_dsn != sa_pdb_dsn or not (sa_del.sa_test_only | default(false) | bool) }}"
+      msg: "test policy (sa_test_only): run it with -e sa_test_pdb=<dsn>, never on {{ sa_pdb_dsn }}."
+  loop_control:
+    label: "{{ item.msg[:40] }}"
+
+- name: "SA | {{ sa_policy_name }} (delete): render templates/delete.txt.j2"
+  ansible.builtin.set_fact:
+    sa_textfile_del_parts: >-
+      {{ sa_textfile_del_parts + [lookup('ansible.builtin.template',
+           playbook_dir ~ '/../templates/delete.txt.j2',
+           template_vars={'sa_new_policy': sa_del_policy}) | trim] }}
+    sa_deleted_names: "{{ sa_deleted_names + sa_del_names }}"

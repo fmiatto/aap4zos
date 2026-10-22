@@ -1,9 +1,9 @@
 {#
-  Job card shared by every job add_to_sa.yml submits (textupd.jcl.j2,
+  Job card shared by every job sa_policy.yml submits (textupd.jcl.j2,
   ingebbld.jcl.j2, newgen.jcl.j2).  Built from sa_job (vars/sa_env.yml) and
   sa_jobname:
 
-    //SAPTXUPD JOB MSGCLASS=X,CLASS=A,NOTIFY=&SYSUID,
+    //SATXUPD  JOB MSGCLASS=X,CLASS=A,NOTIFY=&SYSUID,
     //         REGION=0M,TIME=NOLIMIT
 
   account / programmer are added as positional fields only when set.

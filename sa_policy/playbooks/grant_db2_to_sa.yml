@@ -45,10 +45,10 @@
     db2_tep2_plan: DSNTEP13                    # DSNTEP!! plan, !! = Db2 13
     # User IDs to grant to; empty = the user ID of the sa_proc started task
     db2_grantees: []
-    job_name: SAPGRANT
+    job_name: SAGRANT
     job_class: A
     job_msgclass: X
-    work_pds: SYSAUTO.PROTO.SAPDB.WORK         # the JCL is stored here as (GRANT)
+    work_pds: SYSAUTO.ANSIBLE.JCL         # the JCL is stored here as (GRANT)
 
   tasks:
 

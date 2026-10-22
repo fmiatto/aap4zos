@@ -1,0 +1,37 @@
+---
+# =============================================================================
+# File    : vars/policies/example-delete.yml   (sa_policies_delete name:
+#           example-delete)
+# Purpose : TEST PDB ONLY - the least a policy file needs to delete entries:
+#           only the names, in the layout of any policy file.  It names the
+#           entries example-add.yml creates, so it removes them again:
+#
+#   ansible-playbook -i sa_policy/inventory/local/inventory.yml \
+#     sa_policy/playbooks/sa_policy.yml \
+#     -e sa_test_pdb=SYSAUTO.PROTO.TESTPDB \
+#     -e sa_policies= -e sa_policies_delete=example-delete --tags apply,build
+#
+# Any full policy file (db2-dba1, ims15, example-add, ...) can be listed in
+# sa_policies_delete the same way: only its names are used.  The text file
+# gets, in this order:
+#   DEL APL  each APL
+#   DEL APG  the APG
+#   DEL APL  each class, from the last to the first (parent classes are
+#            listed first, so children go before their parents)
+# keep_on_delete: true on an entry leaves it out (for example a class that
+# other policies still use: SA deletes a class even while APLs link to it).
+# =============================================================================
+sa_test_only: true
+
+sa_new_policy:
+
+  classes:
+    - name: C_EX_BASE
+    - name: C_EX_CHILD
+
+  apg:
+    name: EX_GROUP
+
+  apls:
+    - name: EXAPL1
+    - name: EXAPL2
