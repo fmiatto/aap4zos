@@ -67,6 +67,7 @@ Variables given only with `-e`:
 | [cics62.yml](vars/policies/cics62.yml) | APG `CICS62_CICS`: CICS region CICS62 on class `C_CICS`, with its own shutdown |
 | [rmf.yml](vars/policies/rmf.yml) | Update-only: Restart after IPL `START` on the existing APL `RMF` |
 | [mq1.yml](vars/policies/mq1.yml) | APG `MQ1_MQ`: IBM MQ queue manager, channel initiator and web console, with their own start and stop commands and messages |
+| [ims15.yml](vars/policies/ims15.yml) | The IMS classes and APG `IMS15`: IMS DB/DC with IRLM, CSL (SCI, OM, RM, RS), DLISAS, DBRC, dependent regions and IMS Connect. Not in `sa_policies` (IMS is not installed on LTE1) |
 | [syntax-test.yml](vars/policies/syntax-test.yml) | Test PDB only: two classes and an APL using every section the template writes |
 | [syntax-test-thresholds.yml](vars/policies/syntax-test-thresholds.yml) | Test PDB only, update-only: APL thresholds on the syntax-test APL |
 
@@ -227,7 +228,7 @@ Each message has an `id`, an optional `description` and any of these actions:
       messages:
         - id: CSQY022I
           description: Queue manager is available
-          at: { status: UP }                # AT: status, monitor_status, capture, override
+          at: { status: UP }                # AT: status, monitor_status, capture, condition, override, ...
         - id: DFS3907A
           reply: [{ text: S }]              # REPLY: text, selection, retry
         - id: DSNP007I
@@ -247,6 +248,12 @@ Each message has an `id`, an optional `description` and any of these actions:
             - { msgid: DFS2011I, jobname: "*", severity: CRITICAL, alert: "YES" }
               # also: user, inform_list, comment_type, comment_text, dom_list
 ```
+
+AT keys and their export field names: `ignore` (Ignore for AT), `placement` (AT message
+placement), `check_msgid` (AT check for message id), `ignore_chars` (AT ignore message id
+characters), `condition` (AT additional condition, e.g. `"HDRMTYPE = '>'"`), `status` (AT
+application status), `monitor_status` (AT monitor status), `capture` (AT Capture message
+selection), `dom_option` (AT Capture message DOM option), `override` (AT override).
 
 The `messages` part replaces all messages of the entry. The build puts the AT entries into
 `ACFMZ999` and the message IDs into `MPFLSTSA`; they take effect only if NetView loads that
@@ -295,7 +302,8 @@ checks its own limits again in the update report and writes nothing when one is 
 - an APL without a class has a `StartsMe` / `StopsMe` relationship but no matching
   `external_startup` / `external_shutdown`;
 - a message has `capture:` but is not `CAPMSGS`, or `CAPMSGS` has `code:`;
-- an AT key other than `status`, `monitor_status`, `capture`, `override` is used;
+- an AT key other than `status`, `monitor_status`, `capture`, `condition`, `override`,
+  `ignore`, `placement`, `check_msgid`, `ignore_chars`, `dom_option` is used;
 - a threshold is not a number of 0-999 or an `hh:mm:ss` interval;
 - a value is longer than its limit (table above), or a text-file line is longer than
   `sa_text_lrecl`;

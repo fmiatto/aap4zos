@@ -1,0 +1,673 @@
+---
+# =============================================================================
+# File    : vars/policies/ims15.yml   (sa_policies name: ims15)
+# Purpose : IMS subsystem IMS15 (DB/DC with CSL): the IMS classes, one APG
+#           and its APLs.  Not in sa_policies: IMS is not installed on LTE1.
+#           Add it with -e sa_policies=ims15 on a system that runs the IMS15
+#           address spaces (job names = APL names), or try it on a test PDB:
+#
+#   ansible-playbook -i sa_policy/inventory/local/inventory.yml \
+#     sa_policy/playbooks/add_to_sa.yml \
+#     -e sa_test_pdb=SYSAUTO.PROTO.TESTPDB -e sa_policies=ims15 \
+#     --tags apply,build
+#
+# Classes (shared by every IMS, then IMS15's own):
+#   C_IMS_CONTROL         control regions: start (S ...,PARM1='AUTO=Y|N'),
+#   ├ C_IMS_DBDC          restart replies, abend codes, OLDS, captured
+#   └ C_IMS_DBCTL         messages, DB2/MQ connection monitoring
+#   C_IMS_APPLICATIONS    dependent regions, started by the control region
+#   ├ C_IMS15_TP_APPLS    (/STA REGION); the IMS15 classes add the parent
+#   └ C_IMS15_BMP_APPLS   IMS15CTL and the /STOP REGION shutdown
+#   C_IMS_SUBORDINATES    DLISAS and DBRC: started and stopped by the
+#   └ C_IMS15_SUBORDINATES  control region (external startup/shutdown ALWAYS)
+#   C_IMS_GENERIC         IRLM, CSL (SCI, OM, RM, RS), IMS Connect: P / C
+#   C_IMS_FDBR            Fast DB Recovery regions (none in IMS15)
+#
+# Start order (HASPARENT):
+#   BASE_SYS -> IMS15RL1 (IRLM), IMS15SCI
+#   IMS15SCI -> IMS15OM1, IMS15RS1 -> IMS15RM1
+#   IMS15RL1, SCI, OM1, RM1 -> IMS15CTL -> DL1, RC1 (StartsMeAndStopsMe),
+#                                          F11, M11, M12 (/STA REGION), HWS
+#   The dependent regions' parent has sequence 1: SA takes &SUBP... (the
+#   parent's subsystem ID and command prefix) from it.
+# =============================================================================
+# Full add: NEW sections create the entries, then the UPD sections.
+# true = UPD sections only, for entries that already exist
+# (-e sa_update_only=true does that for every file of a run).
+sa_update_only: false
+
+sa_new_policy:
+
+  classes:
+
+    # -------------------------------------------------------------------------
+    # Control regions
+    # -------------------------------------------------------------------------
+    - name: C_IMS_CONTROL
+      subsystem: C_IMSCTL
+      category: IMS
+      subcategory: CTL
+      description: Class for IMS Control regions
+      long_description:
+        - Parent class of C_IMS_DBDC and C_IMS_DBCTL
+      messages:
+        - id: ABCODEPROG
+          description: Specifications for ABCODEPROG
+          code:
+            - { code1: "*", code2: "*", code3: "*", value: INCLUDE }
+        - id: CAPMSGS
+          description: Message capturing (AOFCPMSG parameters)
+          capture:
+            - { msgid: DFS0414I, jobname: "*", severity: CRITICAL, alert: "YES" }
+            - { msgid: DFS0739X, jobname: "*", severity: CRITICAL, alert: "YES" }
+            - { msgid: DFS2011I, jobname: "*", severity: CRITICAL, alert: "YES" }
+            - { msgid: DFS2012I, jobname: "*", severity: CRITICAL, alert: "YES" }
+            - { msgid: DFS4164W, jobname: "*", severity: CRITICAL, alert: "YES" }
+            - { msgid: DFS0844I, jobname: "*", severity: CRITICAL, alert: "YES" }
+            - { msgid: DFS0845I, jobname: "*", severity: CRITICAL, alert: "YES" }
+            - { msgid: DFS2013, jobname: "*", severity: CRITICAL, alert: "YES" }
+            - { msgid: DFS2014, jobname: "*", severity: CRITICAL, alert: "YES" }
+            - { msgid: DFS2015, jobname: "*", severity: CRITICAL, alert: "YES" }
+            - { msgid: DFS2016, jobname: "*", severity: CRITICAL, alert: "YES" }
+            - { msgid: DFS2017, jobname: "*", severity: CRITICAL, alert: "YES" }
+            - { msgid: DFS2018, jobname: "*", severity: CRITICAL, alert: "YES" }
+            - { msgid: DFS3492W, jobname: "*", severity: CRITICAL, alert: "YES" }
+        # Captured messages: AT entries that select them for capturing.
+        - { id: DFS0414I, description: CRITICAL message captured, at: { capture: SELECTED } }
+        - { id: DFS0844I, description: CRITICAL message captured, at: { capture: SELECTED } }
+        - { id: DFS0845I, description: CRITICAL message captured, at: { capture: SELECTED } }
+        - { id: DFS2011I, description: CRITICAL message captured, at: { capture: SELECTED } }
+        - { id: DFS2012I, description: CRITICAL message captured, at: { capture: SELECTED } }
+        - { id: DFS2013, description: CRITICAL message captured, at: { capture: SELECTED } }
+        - { id: DFS2014, description: CRITICAL message captured, at: { capture: SELECTED } }
+        - { id: DFS2015, description: CRITICAL message captured, at: { capture: SELECTED } }
+        - { id: DFS2016, description: CRITICAL message captured, at: { capture: SELECTED } }
+        - { id: DFS2017, description: CRITICAL message captured, at: { capture: SELECTED } }
+        - { id: DFS2018, description: CRITICAL message captured, at: { capture: SELECTED } }
+        - { id: DFS3492W, description: CRITICAL message captured, at: { capture: SELECTED } }
+        - { id: DFS4164W, description: CRITICAL message captured, at: { capture: SELECTED } }
+        # Restart and operation.
+        - id: DFS033I
+          description: IMS restart aborted
+          cmd:
+            - { selection: "3", command: "MVS &SUBSSUBIDERE OVERRIDE" }
+        - id: DFS0618A
+          description: IMS restart aborted
+          reply:
+            - { retry: 9, text: "/ERE OVERRIDE." }
+          at: { condition: "HDRMTYPE = '>'" }
+        - id: DFS3626I
+          description: IMS restart aborted
+          reply:
+            - { retry: 9, text: "/ERE OVERRIDE." }
+        - id: DFS2867A
+          description: External trace not usable, use OLDS
+          reply:
+            - { text: "Y" }
+        - id: DFS3907A
+          description: Reply to WTOR after DFSDUMP failed
+          reply:
+            - { text: S }
+        - id: DFS554A
+          description: Application program abend
+          cmd:
+            - { selection: PROG, command: "MVS &SUBSSUBIDSTA PGM &EHKVAR2." }
+        - id: DFS629I
+          description: IMS Abend Codes
+          code:
+            - { code1: "*", code2: S000, code3: U0020, value: ABENDING }
+            - { code1: "*", code2: S000, code3: U0028, value: IGNORE }
+            - { code1: "*", code2: S000, code3: U0075, value: BREAKING }
+            - { code1: "*", code2: S000, code3: U0113, value: ABENDING }
+            - { code1: "*", code2: S000, code3: U0707, value: ABENDING }
+            - { code1: "*", code2: S000, code3: U4095, value: IGNORE }
+            - { code1: "*", code2: "*", code3: "*", value: BREAKING }
+        # OLDS switching: thresholds of minor resource DFS3257I below.
+        - id: DFS3257I
+          description: OLDS switched
+          cmd:
+            - { selection: INFR, command: "INGMON OLDS_SWITCH,JOBNAME=&SUBSJOB,STATUS=WARNING,INFO=(INFREQUENT THRESHOLDS LIMIT REACHED FOR OLDS SWITCHING)" }
+            - { selection: FREQ, command: "INGMON OLDS_SWITCH,JOBNAME=&SUBSJOB,STATUS=MINOR,INFO=(FREQUENT OLDS SWITCHING DETECTED)" }
+            - { selection: CRIT, command: "INGMON OLDS_SWITCH,JOBNAME=&SUBSJOB,STATUS=CRITICAL,INFO=(CRITICAL OLDS SWITCHING FREQUENCY REACHED)" }
+            - { selection: ALWAYS, command: "INGMON OLDS_SWITCH,JOBNAME=&SUBSJOB,STATUS=NORMAL,INFO=(OLDS SWITCHING FREQUENCY IS NORMAL)" }
+          at:
+            condition: "TOKEN(5) = 'SWITCHED' & TEXT = . ' - FROM DFSOLP' ."
+            monitor_status: CHECK
+        - id: OLDS
+          description: Online Log Dataset Recovery
+          mixed_case: "NO"
+          user:
+            - { keyword: MINIMUM, data: "03" }
+            - { keyword: SPARES, data: "(04,05,99)" }
+            - { keyword: BACKOUT, data: "2" }
+        - id: WTORS
+          description: Classification for WTORs
+          code:
+            - { code1: DFS996I, code2: "*", value: NORMAL PRI }
+        # DB2 and MQ connections: INGMON the monitor resource named in the
+        # message text.
+        - id: DFS0801I
+          description: IMS-DB2 or IMS-MQ connection established
+          mixed_case: "NO"
+          user:
+            - { keyword: OFFSET, data: "1" }
+            - { keyword: MSGDISP, data: AUTO }
+          at:
+            override:
+              - "IF MSGID = 'DFS0801I' & TEXT = . 'SUBSYSTEM CONNECTION FOR' OBJ . THEN"
+              - "EXEC(CMD('INGMON ' OBJ ',STATUS=NORMAL') ROUTE(ONE %AOFOPGSSOPER%));"
+        - id: DFS3611E
+          description: IMS-DB2 or IMS-MQ connection terminated
+          mixed_case: "NO"
+          user:
+            - { keyword: OFFSET, data: "1" }
+            - { keyword: MSGDISP, data: AUTO }
+          at:
+            override:
+              - "IF MSGID = 'DFS3611E' & TEXT = . 'EXTERNAL SUBSYSTEM' OBJ . THEN"
+              - "EXEC(CMD('INGMON ' OBJ ',STATUS=MINOR') ROUTE(ONE %AOFOPGSSOPER%));"
+        - id: DFS3611I
+          description: IMS-DB2 or IMS-MQ connection terminated
+          mixed_case: "NO"
+          user:
+            - { keyword: OFFSET, data: "1" }
+            - { keyword: MSGDISP, data: AUTO }
+          at:
+            override:
+              - "IF MSGID = 'DFS3611I' & TEXT = . 'EXTERNAL SUBSYSTEM' OBJ . THEN"
+              - "EXEC(CMD('INGMON ' OBJ ',STATUS=MINOR') ROUTE(ONE %AOFOPGSSOPER%));"
+        - id: DFS3611W
+          description: IMS-DB2 or IMS-MQ connection terminated
+          mixed_case: "NO"
+          user:
+            - { keyword: OFFSET, data: "1" }
+            - { keyword: MSGDISP, data: AUTO }
+          at:
+            override:
+              - "IF MSGID = 'DFS3611W' & TEXT = . 'EXTERNAL SUBSYSTEM' OBJ . THEN"
+              - "EXEC(CMD('INGMON ' OBJ ',STATUS=MINOR') ROUTE(ONE %AOFOPGSSOPER%));"
+        - id: DSNM003I
+          description: IMS-DB2 connection failed
+          mixed_case: "NO"
+          user:
+            - { keyword: OFFSET, data: "1" }
+            - { keyword: MSGDISP, data: AUTO }
+          at:
+            override:
+              - "IF MSGID = 'DSNM003I' & TEXT = . 'CONNECT TO SUBSYSTEM' OBJ . THEN"
+              - "EXEC(CMD('INGMON ' OBJ ',STATUS=MINOR') ROUTE(ONE %AOFOPGSSOPER%));"
+        - id: CSQQ002E
+          description: IMS-MQ connection failed
+          mixed_case: "NO"
+          user:
+            - { keyword: OFFSET, data: "1" }
+            - { keyword: MSGDISP, data: AUTO }
+          at:
+            override:
+              - "IF MSGID = 'CSQQ002E' &"
+              - "   TEXT = . 'connect to queue manager' OBJ . THEN"
+              - "EXEC(CMD('INGMON ' OBJ ',STATUS=MINOR') ROUTE(ONE %AOFOPGSSOPER%));"
+      startup:
+        - phase: STARTUP
+          commands:
+            - { type: AUTO, command: "MVS S &SUBSJOB,PARM1='AUTO=Y'" }
+            - { type: COLD, command: "MVS S &SUBSJOB,PARM1='AUTO=N'" }
+            - { type: NORM, command: "MVS S &SUBSJOB,PARM1='AUTO=Y'" }
+            - { type: WARMSDBL, command: "MVS S &SUBSJOB,PARM1='AUTO=N'" }
+            - { type: MANUAL, command: "MVS S &SUBSJOB,PARM1='AUTO=N'" }
+      shutdown:
+        - phase: FORCE
+          passes:
+            - { pass: 1, command: "MVS F &SUBSJOB,STOP" }
+      minor_resources:
+        - name: DFS3257I
+          thresholds: { critical_number: 3, critical_interval: "00:10:00", frequent_number: 3, frequent_interval: "00:30:00", infrequent_number: 3, infrequent_interval: "01:00:00" }
+        - name: PROG
+          thresholds: { critical_number: 3, critical_interval: "00:10:00", frequent_number: 3, frequent_interval: "00:30:00", infrequent_number: 3, infrequent_interval: "01:00:00" }
+        - name: TRAN
+          thresholds: { critical_number: 3, critical_interval: "00:10:00", frequent_number: 3, frequent_interval: "00:30:00", infrequent_number: 3, infrequent_interval: "01:00:00" }
+
+    - name: C_IMS_DBDC
+      subsystem: C_IMS_DBDC
+      link_to_class: C_IMS_CONTROL
+      category: IMS
+      subcategory: CTL
+      description: Class for IMS Control Regions (DB/DC)
+      long_description:
+        - This Class is a subclass of C_IMS_CONTROL.
+        - It contains definitions applicable to IMS DB/DC
+        - regions.
+      messages:
+        - id: ABCODETRAN
+          description: Specifications for ABCODETRAN
+          code:
+            - { code1: "*", code2: "*", code3: "*", value: INCLUDE }
+        - id: DFS3139I
+          description: Reply to get DFS996I
+          reply:
+            - { text: "." }
+        - id: DFS554A
+          description: Specifications for DFS554A
+          cmd:
+            - { selection: PROG, command: "MVS &SUBSSUBIDSTA PGM &EHKVAR2." }
+            - { selection: TRAN, command: "MVS &SUBSSUBIDSTA TRAN &EHKVAR1." }
+        - id: DFS810A
+          description: Specifications for DFS810A
+          reply:
+            - { selection: COLD, text: "/NRE CHKPT 0 FORMAT ALL" }
+            - { selection: MANUAL, text: "&APPLPARMS" }
+            - { selection: NORM, text: "/NRE" }
+            - { selection: WARMSDBL, text: "/NRE MSDBLOAD" }
+        - id: IMSINFO
+          description: Get IMS Information for DISPINFO cmd
+          user:
+            - { keyword: IMSCMD, data: "('CQS DATA','DISPLAY CQS')" }
+        - id: UP_VTAM
+          description: Send /START DC after VTAM was recycled
+          cmd:
+            - { command: "MVS &SUBSSUBIDSTA DC" }
+        - id: WTORS
+          description: Classification for WTORs
+          code:
+            - { code1: DFS996I, code2: "*", value: NORMAL PRI }
+            - { code1: "*", code2: "*", value: IMPORTANT SEC }
+      startup:
+        - phase: POSTSTART
+          commands:
+            - { command: "MVS &SUBSSUBIDCQSET SHUTDOWN SHAREDQ ON STRUCTURE ALL" }
+            - { command: "MVS &SUBSSUBIDSTA DC" }
+            - { command: "MVS &SUBSSUBIDCHE" }
+      shutdown:
+        - phase: NORM
+          passes:
+            - { pass: 1, command: "MVS &SUBSSUBIDCHE DUMPQ NOCQSSHUT" }
+            - { pass: 2, command: "MVS &SUBSSUBIDCHE DUMPQ NOCQSSHUT" }
+            - { pass: 3, command: "MVS &SUBSSUBIDCHE DUMPQ NOCQSSHUT" }
+        - phase: IMMED
+          passes:
+            - { pass: 1, command: "MVS &SUBSSUBIDCHE FREEZE NOCQSSHUT" }
+            - { pass: 2, command: "MVS &SUBSSUBIDCHE FREEZE NOCQSSHUT" }
+            - { pass: 3, command: "MVS &SUBSSUBIDCHE FREEZE NOCQSSHUT" }
+
+    - name: C_IMS_DBCTL
+      subsystem: C_IMS_DBCTL
+      link_to_class: C_IMS_CONTROL
+      category: IMS
+      subcategory: CTL
+      description: Class for IMS Control Regions (DBCTL)
+      long_description:
+        - This Class is a subclass of C_IMS_CONTROL.
+        - It contains definitions applicable to IMS DBCTL
+        - regions.
+      messages:
+        - id: DFS989I
+          description: DBCTL Restart commands
+          cmd:
+            - { selection: COLD, command: "MVS &SUBSSUBIDNRE CHKPT 0 FORMAT ALL" }
+            - { selection: WARM, command: "MVS &SUBSSUBIDNRE FORMAT RS" }
+            - { selection: MANUAL, command: "MVS &SUBSSUBID&APPLPARMS" }
+        - id: WTORS
+          description: Classification for WTORs
+          code:
+            - { code1: "*", code2: "*", code3: "*", value: IMPORTANT SEC }
+      startup:
+        - phase: STARTUP
+          commands:
+            - { type: AUTO, command: "MVS S &SUBSJOB,PARM1='AUTO=Y'" }
+            - { type: COLD, command: "MVS S &SUBSJOB,PARM1='AUTO=N'" }
+            - { type: NORM, command: "MVS S &SUBSJOB,PARM1='AUTO=Y'" }
+            - { type: MANUAL, command: "MVS S &SUBSJOB,PARM1='AUTO=N'" }
+            - { type: WARM, command: "MVS S &SUBSJOB,PARM1='AUTO=N'" }
+        - phase: POSTSTART
+          commands:
+            - { command: "MVS &SUBSSUBIDCHE" }
+      shutdown:
+        - phase: NORM
+          passes:
+            - { pass: 1, command: "MVS &SUBSSUBIDCHE FREEZE" }
+            - { pass: 2, command: "MVS &SUBSSUBIDCHE FREEZE" }
+            - { pass: 3, command: "MVS &SUBSSUBIDCHE FREEZE" }
+
+    # -------------------------------------------------------------------------
+    # Dependent (application) regions
+    # -------------------------------------------------------------------------
+    - name: C_IMS_APPLICATIONS
+      subsystem: C_IMSAPPL
+      category: IMS
+      description: Class for IMS Application Regions
+      long_description:
+        - Class for IMS Application Regions like Fastpath,
+        - Message, or Batch Message Processing Regions
+      messages:
+        - id: DFS3907A
+          description: Reply to WTOR after DFSDUMP failed
+          reply:
+            - { text: S }
+      startup:
+        - phase: STARTUP
+          commands:
+            - { command: "MVS &SUBPSUBIDSTA REGION &SUBSJOB." }
+
+    - name: C_IMS15_TP_APPLS
+      subsystem: C_IMS15_TP
+      link_to_class: C_IMS_APPLICATIONS
+      category: IMS
+      subcategory: TP
+      description: Class for IMS15 FP/MP Regions
+      long_description:
+        - Class for IMS15 Application Regions like Fastpath
+        - and Message Processing Regions
+      relationships:
+        - { type: HASPARENT, resource: IMS15CTL/APL/=, sequence: 1 }
+      shutdown:
+        - phase: NORM
+          passes:
+            - { pass: 1, command: "MVS &SUBPSUBIDSTOP REGION JOBNAME &SUBSJOB" }
+            - { pass: 3, command: "MVS &SUBPSUBIDSTOP REGION JOBNAME &SUBSJOB ABDUMP &EHKVAR1." }
+            - { pass: 5, command: "MVS &SUBPSUBIDSTOP REGION JOBNAME &SUBSJOB CANCEL" }
+            - { pass: 6, command: "MVS C &SUBSJOB" }
+        - phase: IMMED
+          passes:
+            - { pass: 1, command: "MVS &SUBPSUBIDSTOP REGION JOBNAME &SUBSJOB" }
+            - { pass: 2, command: "MVS &SUBPSUBIDSTOP REGION JOBNAME &SUBSJOB ABDUMP &EHKVAR1." }
+            - { pass: 3, command: "MVS &SUBPSUBIDSTOP REGION JOBNAME &SUBSJOB CANCEL" }
+            - { pass: 4, command: "MVS C &SUBSJOB" }
+        - phase: FORCE
+          passes:
+            - { pass: 1, command: "MVS &SUBPSUBIDSTOP REGION JOBNAME &SUBSJOB" }
+            - { pass: 2, command: "MVS &SUBPSUBIDSTOP REGION JOBNAME &SUBSJOB ABDUMP &EHKVAR1." }
+            - { pass: 3, command: "MVS &SUBPSUBIDSTOP REGION JOBNAME &SUBSJOB CANCEL" }
+            - { pass: 4, command: "MVS C &SUBSJOB" }
+
+    - name: C_IMS15_BMP_APPLS
+      subsystem: C_IMS15_BMP
+      link_to_class: C_IMS_APPLICATIONS
+      category: IMS
+      subcategory: BMP
+      description: Class for IMS15 BMP Regions
+      long_description:
+        - Class for IMS15 Batch Message Processing Regions
+      relationships:
+        - { type: HASPARENT, resource: IMS15CTL/APL/=, sequence: 1 }
+      shutdown:
+        - phase: NORM
+          passes:
+            - { pass: 1, command: "MVS &SUBPSUBIDSTOP REGION JOBNAME &SUBSJOB ABDUMP" }
+            - { pass: 3, command: "MVS &SUBPSUBIDSTOP REGION JOBNAME &SUBSJOB CANCEL" }
+            - { pass: 5, command: "MVS C &SUBSJOB" }
+        - phase: IMMED
+          passes:
+            - { pass: 1, command: "MVS &SUBPSUBIDSTOP REGION JOBNAME &SUBSJOB ABDUMP" }
+            - { pass: 2, command: "MVS &SUBPSUBIDSTOP REGION JOBNAME &SUBSJOB CANCEL" }
+            - { pass: 3, command: "MVS C &SUBSJOB" }
+        - phase: FORCE
+          passes:
+            - { pass: 1, command: "MVS &SUBPSUBIDSTOP REGION JOBNAME &SUBSJOB ABDUMP" }
+            - { pass: 2, command: "MVS &SUBPSUBIDSTOP REGION JOBNAME &SUBSJOB CANCEL" }
+            - { pass: 3, command: "MVS C &SUBSJOB" }
+
+    # -------------------------------------------------------------------------
+    # Subordinate regions (DLISAS, DBRC): the control region starts and
+    # stops them.
+    # -------------------------------------------------------------------------
+    - name: C_IMS_SUBORDINATES
+      subsystem: C_IMS_SUB
+      description: Class for IMS Subordinate Regions
+      external_startup: ALWAYS
+      external_shutdown: ALWAYS
+      messages:
+        - id: CAPMSGS
+          description: Message capturing (AOFCPMSG parameters)
+          capture:
+            - { msgid: DFS2011I, jobname: "*", severity: CRITICAL, alert: "YES" }
+        - id: DFS3907A
+          description: Reply to WTOR after DFSDUMP failed
+          reply:
+            - { text: S }
+
+    - name: C_IMS15_SUBORDINATES
+      subsystem: C_IMS15_SUB
+      link_to_class: C_IMS_SUBORDINATES
+      description: Class for IMS15 Subordinate Regions
+      relationships:
+        - { type: HASPARENT, resource: IMS15CTL/APL/=, sequence: 1, condition: StartsMeAndStopsMe }
+
+    # -------------------------------------------------------------------------
+    # IRLM, CSL and IMS Connect; Fast DB Recovery
+    # -------------------------------------------------------------------------
+    - name: C_IMS_GENERIC
+      subsystem: C_IMSGENER
+      description: Class for IMS IRLM, CSL and IMS Connect
+      shutdown:
+        - phase: NORM
+          passes:
+            - { pass: 1, command: "MVS P &SUBSJOB" }
+            - { pass: 2, command: "MVS P &SUBSJOB" }
+            - { pass: 3, command: "MVS C &SUBSJOB" }
+        - phase: IMMED
+          passes:
+            - { pass: 1, command: "MVS P &SUBSJOB" }
+            - { pass: 2, command: "MVS C &SUBSJOB" }
+        - phase: FORCE
+          passes:
+            - { pass: 1, command: "MVS C &SUBSJOB" }
+
+    - name: C_IMS_FDBR
+      subsystem: C_IMS_FDBR
+      category: IMS
+      subcategory: FDR
+      description: Class for IMS Fast DB Recovery (FDBR)
+      external_shutdown: FINAL
+      messages:
+        - id: DFS3907A
+          description: Reply to WTOR after DFSDUMP failed
+          reply:
+            - { text: S }
+      startup:
+        - phase: POSTSTART
+          commands:
+            - { command: "MVS F &SUBSJOB,STATUS" }
+      shutdown:
+        - phase: NORM
+          passes:
+            - { pass: 1, command: "MVS F &SUBSJOB,TERM" }
+            - { pass: 3, command: "MVS F &SUBSJOB,STOP" }
+            - { pass: 4, command: "MVS C &SUBSJOB" }
+        - phase: IMMED
+          passes:
+            - { pass: 1, command: "MVS F &SUBSJOB,STOP" }
+            - { pass: 2, command: "MVS C &SUBSJOB" }
+        - phase: FORCE
+          passes:
+            - { pass: 1, command: "MVS F &SUBSJOB,DUMP" }
+            - { pass: 2, command: "MVS C &SUBSJOB" }
+
+  apg:
+    name: IMS15
+    type: SYSTEM
+    nature: BASIC
+    description: IMS subsystem IMS15
+    long_description:
+      - All IMS15 address spaces
+    systems:
+      - LTE1
+
+  apls:
+
+    # IRLM and CSL: started first, on the base system.
+    - name: IMS15RL1
+      subsystem: IMS15RL1
+      job_name: IMS15RL1
+      job_type: MVS
+      link_to_class: C_IMS_GENERIC
+      description: IMS15 Resource Lock Manager (IRLM)
+      relationships:
+        - { type: HASPARENT, resource: BASE_SYS/APG/= }
+
+    - name: IMS15SCI
+      subsystem: IMS15SCI
+      job_name: IMS15SCI
+      job_type: MVS
+      link_to_class: C_IMS_GENERIC
+      description: IMS15 Structured Call Interface (SCI)
+      relationships:
+        - { type: HASPARENT, resource: BASE_SYS/APG/= }
+      shutdown:
+        - phase: NORM
+          passes:
+            - { pass: 1, command: "MVS F &SUBSJOB,SHUTDOWN CSLLCL" }
+            - { pass: 2, command: "MVS P &SUBSJOB" }
+            - { pass: 4, command: "MVS C &SUBSJOB" }
+
+    - name: IMS15OM1
+      subsystem: IMS15OM1
+      job_name: IMS15OM1
+      job_type: MVS
+      link_to_class: C_IMS_GENERIC
+      description: IMS15 Operations Manager (OM)
+      relationships:
+        - { type: HASPARENT, resource: IMS15SCI/APL/= }
+
+    - name: IMS15RS1
+      subsystem: IMS15RS1
+      job_name: IMS15RS1
+      job_type: MVS
+      link_to_class: C_IMS_GENERIC
+      description: IMS15 Repository Server (RS)
+      relationships:
+        - { type: HASPARENT, resource: IMS15SCI/APL/= }
+      messages:
+        - id: FRP2001I
+          description: Subordinate Repository Server is UP
+          at: { status: UP }
+        - id: FRP2025I
+          description: Master Repository Server is UP
+          at: { status: UP }
+
+    - name: IMS15RM1
+      subsystem: IMS15RM1
+      job_name: IMS15RM1
+      job_type: MVS
+      link_to_class: C_IMS_GENERIC
+      description: IMS15 Resource Manager (RM)
+      relationships:
+        - { type: HASPARENT, resource: IMS15SCI/APL/= }
+        - { type: HASPARENT, resource: IMS15RS1/APL/= }
+
+    # Control region.
+    - name: IMS15CTL
+      subsystem: IMS15CTL
+      job_name: IMS15CTL
+      job_type: MVS
+      category: IMS
+      subcategory: CTL
+      link_to_class: C_IMS_DBDC
+      description: IMS15 Control Region
+      relationships:
+        - { type: HASPARENT, resource: IMS15RL1/APL/= }
+        - { type: HASPARENT, resource: IMS15SCI/APL/= }
+        - { type: HASPARENT, resource: IMS15OM1/APL/= }
+        - { type: HASPARENT, resource: IMS15RM1/APL/= }
+      messages:
+        - id: UP_IMS15RL1
+          description: Reconnect if IRLM is recycled
+          cmd:
+            - { command: "MVS F &SUBSJOB,RECONNECT" }
+
+    # Subordinate regions: started and stopped by IMS15CTL.
+    - name: IMS15DL1
+      subsystem: IMS15DL1
+      job_name: IMS15DL1
+      job_type: MVS
+      category: IMS
+      subcategory: DLS
+      link_to_class: C_IMS15_SUBORDINATES
+      description: IMS15 DL/I Secondary Address Space
+
+    - name: IMS15RC1
+      subsystem: IMS15RC1
+      job_name: IMS15RC1
+      job_type: MVS
+      category: IMS
+      subcategory: DBRC
+      link_to_class: C_IMS15_SUBORDINATES
+      description: IMS15 Database Recovery Control (DBRC)
+
+    # Dependent regions: started by IMS15CTL (/STA REGION).
+    - name: IMS15F11
+      subsystem: IMS15F11
+      job_name: IMS15F11
+      job_type: MVS
+      category: IMS
+      subcategory: FP
+      link_to_class: C_IMS15_TP_APPLS
+      description: IMS15 Fast Path Dependent Region
+
+    - name: IMS15M12
+      subsystem: IMS15M12
+      job_name: IMS15M12
+      job_type: MVS
+      category: IMS
+      subcategory: TP
+      link_to_class: C_IMS15_TP_APPLS
+      description: IMS15 Message Processing Region
+
+    - name: IMS15M11
+      subsystem: IMS15M11
+      job_name: IMS15M11
+      job_type: MVS
+      category: IMS
+      subcategory: BMP
+      link_to_class: C_IMS15_BMP_APPLS
+      description: IMS15 Batch Message Processing Region
+
+    # IMS Connect.
+    - name: IMS15HWS
+      subsystem: IMS15HWS
+      job_name: IMS15HWS
+      job_type: MVS
+      link_to_class: C_IMS_GENERIC
+      description: IMS15 IMS Connect
+      relationships:
+        - { type: HASPARENT, resource: IMS15CTL/APL/= }
+      messages:
+        - id: HWSC0000I
+          description: IMS Connect is ready
+          at: { status: UP }
+        - id: HWSC0010I
+          description: IMS Connect port is listening
+          at: { status: UP }
+        - id: WTORS
+          description: Specifications for WTORS
+          code:
+            - { code1: HWSC0000I, code2: "*", value: NORMAL PRI }
+            - { code1: "*", code2: "*", value: IMPORTANT SEC }
+
+  # ---------------------------------------------------------------------------
+  # update_sections - the UPD parts this file writes (left out = off).  A part
+  # is written only for entries that have data for it (fields: README).
+  #   apg               APG long_description, automation_name, behavior,
+  #                     automatically_link (field), relationships (policy)
+  #   description       long_description; in update-only files also
+  #                     description (field)
+  #   application_info  command_prefix, restart_after_ipl, external_startup,
+  #                     external_shutdown, skip_active_status (field)
+  #   relationships     replaces all relationships of the entry (policy)
+  #   messages          replaces all messages of the entry (block)
+  #   startup           replaces all start commands (block)
+  #   shutdown          replaces all stop commands (block)
+  #   thresholds        the entry's error thresholds (field)
+  #   minor_resources   replaces all minor resources (block)
+  #   db2_control       DB2 subsystem ID and active log, APLs only (policy)
+  # ---------------------------------------------------------------------------
+  update_sections:
+    apg: true                         # IMS15 long description
+    description: true
+    application_info: true            # external startup/shutdown of classes
+    relationships: true
+    messages: true
+    startup: true
+    shutdown: true
+    thresholds: false
+    minor_resources: true             # C_IMS_CONTROL: DFS3257I, PROG, TRAN
+    db2_control: false
