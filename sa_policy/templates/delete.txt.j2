@@ -4,9 +4,10 @@
   Purpose  : SA z/OS "Making Updates with Text Files" input that deletes the
              entries of one policy file (vars/policies/<name>.yml), passed in
              as sa_new_policy by render_delete.yml.  Only the names are used.
-  Order    : the APLs, then the APG, then the classes from the last to the
-             first (a policy file lists parent classes first), so nothing is
-             deleted while an entry of the same file still links to it.
+  Order    : the APLs, then the APGs (apg:, then apgs:), then the classes
+             from the last to the first (parent classes come first), so
+             nothing is deleted while an entry of the same file still links
+             to it.
              Entries with keep_on_delete: true are left out.
   =============================================================================
 #}
@@ -14,9 +15,9 @@
 {% for apl in p.apls | default([]) if not (apl.keep_on_delete | default(false) | bool) %}
 DEL APL             : {{ apl.name }}
 {% endfor %}
-{% if p.apg is defined and not (p.apg.keep_on_delete | default(false) | bool) %}
-DEL APG             : {{ p.apg.name }}
-{% endif %}
+{% for g in ([p.apg] if p.apg is defined else []) + (p.apgs | default([])) if not (g.keep_on_delete | default(false) | bool) %}
+DEL APG             : {{ g.name }}
+{% endfor %}
 {% for cls in p.classes | default([]) | reverse if not (cls.keep_on_delete | default(false) | bool) %}
 DEL APL             : {{ cls.name }}
 {% endfor %}

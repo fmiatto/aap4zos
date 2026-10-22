@@ -15,7 +15,7 @@
 # sa_policies_delete the same way: only its names are used.  The text file
 # gets, in this order:
 #   DEL APL  each APL
-#   DEL APG  the APG
+#   DEL APG  each APG (apg:, then apgs:)
 #   DEL APL  each class, from the last to the first (parent classes are
 #            listed first, so children go before their parents)
 # keep_on_delete: true on an entry leaves it out (for example a class that
@@ -31,6 +31,9 @@ sa_new_policy:
 
   apg:
     name: EX_GROUP
+
+  apgs:
+    - name: EX_SUB
 
   apls:
     - name: EXAPL1

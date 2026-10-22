@@ -4,10 +4,13 @@
   Purpose  : SA z/OS "Making Updates with Text Files" input for one policy
              file (vars/policies/<name>.yml), passed in as sa_new_policy by
              render_one.yml:
-               NEW sections   classes, the APG (WHERE_USED SYS), the APLs
+               NEW sections   classes, the APGs (WHERE_USED SYS), the APLs
                               (LINK_TO_CLASS, WHERE_USED APG)
                UPD sections   per class, APG and APL, the parts switched on
                               in update_sections
+             APGs: apg: (the file's APG, default group of its APLs) and the
+             apgs: list, in this order.  An APG is linked to systems only
+             (SA: "Entry type APG requires a valid parent type (SYS GRP)").
              sa_update_only=true leaves out the NEW sections, to update
              entries that already exist.
   Rules    : NEW / UPD / WHERE_USED / LINK_TO_CLASS start in column 1.
@@ -35,6 +38,7 @@
 {% set p = sa_new_policy %}
 {% set us = p.update_sections | default({}) %}
 {% set has_apg = p.apg is defined %}
+{% set groups = ([p.apg] if has_apg else []) + (p.apgs | default([])) %}
 {% set classes = p.classes | default([]) %}
 {% set apls = p.apls | default([]) %}
 {% set upd_only = sa_update_only | default(false) | bool %}
@@ -60,15 +64,18 @@ LINK_TO_CLASS       : {{ cls.link_to_class }}
 {% endif %}
 
 {% endfor %}
-{% if has_apg %}
-NEW APG             : {{ p.apg.name }}
-{{ kv('Type', p.apg.type) }}
-{{ kv('Nature', p.apg.nature) }}
-{{ kv('Short description', p.apg.description) }}
-{% for sys in p.apg.systems | default([]) %}
+{% for g in groups %}
+{%   if not loop.first %}
+
+{%   endif %}
+NEW APG             : {{ g.name }}
+{{ kv('Type', g.type) }}
+{{ kv('Nature', g.nature) }}
+{{ kv('Short description', g.description) }}
+{%   for sys in g.systems | default([]) %}
 WHERE_USED SYS      : {{ sys }}
+{%   endfor %}
 {% endfor %}
-{% endif %}
 {% for apl in apls %}
 
 NEW APL             : {{ apl.name }}
@@ -93,12 +100,12 @@ WHERE_USED APG      : {{ grp }}
 {% endfor %}
 {% endif %}
 {#
-  UPD sections: classes, the file's APG (update_sections.apg), then each
-  APL.  Sections in the order of a dialog export.
+  UPD sections: classes, the APGs (update_sections.apg), then each APL.
+  Sections in the order of a dialog export.
 #}
-{% for e in classes + ([p.apg] if has_apg else []) + apls %}
+{% for e in classes + groups + apls %}
 {%   set is_cls = loop.index0 < classes | length %}
-{%   set is_apg = has_apg and loop.index0 == classes | length %}
+{%   set is_apg = not is_cls and loop.index0 < (classes | length) + (groups | length) %}
 {%   set has_long = e.long_description | default([]) | length > 0 %}
 {%   set has_rels = e.relationships | default([]) | length > 0 %}
 {%   if is_apg %}

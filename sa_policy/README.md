@@ -45,7 +45,7 @@ approvals. To try something first, the same run can work on a copy of the PDB in
 | `sa_config_gdg_base` | `SYSAUTO.PDB.SOCNTL` | Configuration GDG SA loads |
 | `sa_config_volume`, `sa_config_unit`, `sa_config_space` | `LTECAT`, `3390`, `CYL,(40,20,10)` | Where a new generation goes |
 | `sa_dialog_hlq` / `sa_ispf_hlq` | `SYS1.ING` / `SYS1.ISP` | SA dialog and ISPF libraries |
-| `sa_work_hlq` | `SYSAUTO.PROTO` | Work data sets: JCL (`.SAPDB.WORK`), text file (`.SAPDB.WORK.UPD`), update report (`.SAPDB.WORK.RPT`), build output (`.SAPDB.SOCNTL`) |
+| `sa_work_hlq` | `SYSAUTO.ANSIBLE` | Work data sets: JCL (`.JCL`), text file (`.UPD`), update report (`.RPT`), build output (`.SOCNTL`) |
 | `sa_text_lrecl` | `255` | Longest text-file line. 255 is SA's own maximum; the text file is VB, so lines are not padded |
 | `sa_job` | prefix `SA`, class `A`, msgclass `X` | Job card; the jobs are `SATXUPD` (text-file update), `SABUILD`, `SANEWGEN` |
 
@@ -71,8 +71,8 @@ Variables given only with `-e`:
 | [cics62.yml](vars/policies/cics62.yml) | APG `CICS62_CICS`: CICS region CICS62 on class `C_CICS`, with its own shutdown |
 | [rmf.yml](vars/policies/rmf.yml) | Update-only: Restart after IPL `START` on the existing APL `RMF` |
 | [mq1.yml](vars/policies/mq1.yml) | APG `MQ1_MQ`: IBM MQ queue manager, channel initiator and web console, with their own start and stop commands and messages |
-| [ims15.yml](vars/policies/ims15.yml) | The IMS classes and APG `IMS15`: IMS DB/DC with IRLM, CSL (SCI, OM, RM, RS), DLISAS, DBRC, dependent regions and IMS Connect. Not in `sa_policies` (IMS is not installed on LTE1) |
-| [example-add.yml](vars/policies/example-add.yml) | Test PDB only: every field the playbook can write (two classes, an APG, two APLs), to add and to update |
+| [ims15.yml](vars/policies/ims15.yml) | The IMS classes and IMS DB/DC `IMS15` in the layout of IBM's IMS best-practice policy, as a chain of four APGs: `IMS15_SUPP` (IRLM, Repository Server, IMS Connect) → `IMS15_CSL` (SCI, OM, RM) → `IMS15_CTRL` (control region, DLISAS, DBRC) → `IMS15_APPLS` (dependent regions). Not in `sa_policies` (IMS is not installed on LTE1) |
+| [example-add.yml](vars/policies/example-add.yml) | Test PDB only: every field the playbook can write (two classes, two APGs, two APLs), to add and to update |
 | [example-delete.yml](vars/policies/example-delete.yml) | Test PDB only: the minimal file to delete classes, an APG and APLs (the `example-add` entries) |
 
 All files of a run, to delete and to add, go into one text file, applied in one job, then one
@@ -88,33 +88,40 @@ sa_test_only: false                   # true: run only with -e sa_test_pdb
 
 sa_new_policy:
   classes: [...]                      # optional: new classes
-  apg: {...}                          # optional: one application group
+  apg: {...}                          # optional: the file's APG (default group of its APLs)
+  apgs: [...]                         # optional: more APGs
   apls: [...]                         # applications
   update_sections: {...}              # which UPD parts to write
 ```
 
 The text file gets, per policy file:
 
-1. `NEW` sections, unless the file is update-only: the classes, the APG (linked to its
-   `systems`), then the APLs (each linked to its class and joined to its APGs). They create
-   the entries with the fields marked NEW below.
+1. `NEW` sections, unless the file is update-only: the classes, the APGs (`apg:` then
+   `apgs:`, each linked to its `systems`), then the APLs (each linked to its class and joined
+   to its APGs). They create the entries with the fields
+   marked NEW below.
 2. One `UPD` section per class, APG and APL, made of the parts switched on in
    `update_sections`. A part is written only for entries that have data for it.
 
 A full add fails with `Name ... already exists` on an entry that is already in the PDB; SA
 then writes nothing. Update-only files need only each entry's `name` and the fields to change.
 
-### APG (`apg:`)
+### APG (`apg:` and `apgs:`)
+
+`apg:` is the file's APG: APLs without `apgs:` join it. `apgs:` lists more APGs with the same
+fields. Without `apg:`, every APL names its groups. An APG is linked to systems only; it
+cannot be a member of another APG (SA: "Entry type APG requires a valid parent type (SYS
+GRP)"). Groups depend on each other through relationships (`HASPARENT <group>/APG/=`).
 
 | Field | | Values |
 |---|---|---|
-| `name` | NEW | max 20: `A-Z 0-9 @ # $ _` |
+| `name` | NEW | max 11 (the automation manager's resource name), or up to 20 with an `automation_name` of up to 11: `A-Z 0-9 @ # $ _` |
 | `type` | NEW | `SYSTEM` \| `SYSPLEX` |
 | `nature` | NEW | `BASIC` \| `MOVE` \| `SERVER` |
 | `description` | NEW | max 40 |
 | `systems` | NEW | systems the APG is linked to; may be empty (then nothing in the APG is automated) |
 | `long_description` | `apg` | up to 5 lines, max 50 each |
-| `automation_name` | `apg` | default: the APG name |
+| `automation_name` | `apg` | default: the APG name; max 11 |
 | `behavior` | `apg` | `ACTIVE` (default) \| `PASSIVE` |
 | `automatically_link` | `apg` | `YES` (default) \| `NO` |
 | `relationships` | `apg` | as for an APL |
@@ -130,7 +137,7 @@ then writes nothing. Update-only files need only each entry's `name` and the fie
 | `description` | NEW | max 40 (in update-only files written by `description`) |
 | `category`, `subcategory` | NEW | optional, e.g. `DB2` / `MSTR`, `MQ` / `CHIN` |
 | `link_to_class` | NEW | class whose policy the APL inherits |
-| `apgs` | NEW | APGs the APL joins: default the file's APG; `[]` for none; or several |
+| `apgs` | NEW | APGs the APL joins: default the file's APG (`apg:`); `[]` for none; or several |
 | `long_description` | `description` | up to 5 lines, max 50 each |
 | `command_prefix` | `application_info` | e.g. `"-DBA1"` |
 | `restart_after_ipl` | `application_info` | e.g. `START` (start after every IPL; without it the class decides) |
@@ -146,6 +153,13 @@ then writes nothing. Update-only files need only each entry's `name` and the fie
 | `db2_control` | `db2_control` | `subsystem_id` (1-4), `active_log_dataset` (data set name) |
 
 An APL in no APG, or in an APG linked to no system, is defined in the PDB but not automated.
+
+For a subsystem made of many address spaces, follow IBM's best-practice policies (dialog
+add-on policies, `SINGPDB`): one APG per function and the dependencies between the APGs
+(`HASPARENT <group>/APG/=`), and operate the subsystem on the groups; `ims15.yml` is built
+that way. APL-to-APL relationships are then needed only where one address space starts
+another (`StartsMeAndStopsMe`) or takes values from its parent (`sequence: 1`). The name of
+a relationship's supporting resource (`<name>/APG/=`) has at most 11 characters.
 
 ### Class (`classes:`)
 
@@ -347,8 +361,8 @@ ansible-playbook -i sa_policy/inventory/local/inventory.yml sa_policy/playbooks/
 
 | Stage | What it does |
 |---|---|
-| apply | Renders the policies into one text file (`<work>.SAPDB.WORK.UPD`, VB, lines up to 255): the DEL sections of `sa_policies_delete`, then the NEW / UPD sections of `sa_policies`. Runs the text-file update against the PDB and prints SA's update report |
-| build | Full build of the PDB into an empty `<work>.SAPDB.SOCNTL` |
+| apply | Renders the policies into one text file (`<work>.UPD`, VB, lines up to 255): the DEL sections of `sa_policies_delete`, then the NEW / UPD sections of `sa_policies`. Runs the text-file update against the PDB and prints SA's update report |
+| build | Full build of the PDB into an empty `<work>.SOCNTL` |
 | activate | IEBCOPY of the build into `<GDG>(+1)` (allocated like the active generation), `INGAMS REFRESH CFG=<new generation>`, waits until `ACF STATUS` shows it, `INGLIST` of the new APGs and APLs, and lists the deleted entries |
 
 Run one or more stages with `--tags apply`, `--tags build`, `--tags activate` (or
@@ -372,7 +386,7 @@ The text file gets, per file and before any NEW / UPD section:
 
 ```text
 DEL APL             : <each APL>
-DEL APG             : <the APG>
+DEL APG             : <each APG>
 DEL APL             : <each class, from the last to the first>
 ```
 
@@ -387,6 +401,8 @@ sa_new_policy:
     - name: C_EX_CHILD
   apg:
     name: EX_GROUP
+  apgs:
+    - name: EX_SUB
   apls:
     - name: EXAPL1
     - name: EXAPL2

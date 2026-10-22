@@ -2,8 +2,9 @@
 # =============================================================================
 # File    : vars/policies/example-add.yml   (sa_policies name: example-add)
 # Purpose : TEST PDB ONLY - every field sa_policy.yml can write, in one file:
-#           two classes (the second linked to the first), an APG and two
-#           APLs.  example-delete.yml deletes the same entries again.
+#           two classes (the second linked to the first), two APGs (the
+#           second depending on the first) and two APLs.  example-delete.yml
+#           deletes the same entries again.
 #
 #   Add:     ansible-playbook -i sa_policy/inventory/local/inventory.yml \
 #              sa_policy/playbooks/sa_policy.yml \
@@ -176,6 +177,18 @@ sa_new_policy:
     relationships:
       - { type: HASPARENT, resource: BASE_SYS/APG/= }
 
+  # More APGs (apgs: list, after apg:); names max 11 characters (the
+  # automation manager's resource names).  A group depends on another with
+  # HASPARENT <group>/APG/=; an APG cannot be a member of another APG.
+  apgs:
+    - name: EX_SUB
+      type: SYSTEM
+      nature: BASIC
+      description: Example group after EX_GROUP
+      systems: [LTE1]
+      relationships:
+        - { type: HASPARENT, resource: EX_GROUP/APG/= }
+
   # ---------------------------------------------------------------------------
   # APLs
   # ---------------------------------------------------------------------------
@@ -243,7 +256,7 @@ sa_new_policy:
       category: DB2
       subcategory: DIST
       description: Example application started by EXAPL1
-      apgs: [EX_GROUP]                  # default: the file's APG; [] for none
+      apgs: [EX_SUB]                    # default: the file's APG (apg:); [] for none
       external_startup: ALWAYS
       external_shutdown: ALWAYS
       relationships:

@@ -18,12 +18,10 @@
 # -e sa_policies_delete=ims15; -e sa_policies= gives an empty list.
 # ---------------------------------------------------------------------------
 sa_policies:
-  - db2-dba1
-  - cics62
-  - rmf
-  - mq1
+   - ims15
 
 sa_policies_delete: []
+
 
 # ---------------------------------------------------------------------------
 # SA z/OS on the target system

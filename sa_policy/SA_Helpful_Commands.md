@@ -57,10 +57,22 @@ F AUTOPROC,INGINFO REFAPL/APL/LTE1,OUTMODE=LINE       status, class, relationshi
 F AUTOPROC,DISPACF REFAPL                              loaded policy: start/stop commands, messages
 F AUTOPROC,ACF ENTRY=REFAPL,TYPE=*,REQ=DISP            raw ACF entries of the subsystem
 F AUTOPROC,DISPINFO REFAPL                             job name, proc, parameters, thresholds
-F AUTOPROC,INGRELS REFAPL/APL/LTE1                     dependencies
-F AUTOPROC,DISPTREE REFAPL                             dependency tree
+F AUTOPROC,INGRELS REFAPL/APL/LTE1,OUTMODE=LINE       relationships both ways, with their conditions
+F AUTOPROC,DISPTREE REFAPL                             dependency tree (APL-to-APL relationships only)
 F AUTOPROC,DISPFLGS                                    automation flags
 ```
+
+DISPTREE draws only relationships defined between APLs. Dependencies defined on application
+groups (`HASPARENT <group>/APG/=`, as in `ims15.yml`) apply to the group's members but do not
+appear there; `INGRELS` shows them, for an APG or a member:
+
+```text
+F AUTOPROC,INGRELS IMS15_CTRL/APG/LTE1,OUTMODE=LINE    F = the group's parents, B = its dependents
+F AUTOPROC,INGRELS IMS15CTL/APL/LTE1,OUTMODE=LINE      HasMember: the dependency it gets from its group
+```
+
+A graphical view of resources and relationships (NetView Management Console, NMC) needs
+RODM, GMFHS and SA's topology manager (`INGTOPO`) on the host; LTE1 runs none of them.
 
 The whole system:
 

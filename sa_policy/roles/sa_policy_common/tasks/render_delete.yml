@@ -12,13 +12,14 @@
     file: "{{ playbook_dir }}/../vars/policies/{{ sa_policy_name }}.yml"
     name: sa_del
 
-# The entries to delete: every APL, the APG and every class of the file,
-# without those that set keep_on_delete: true.
+# The entries to delete: every APL, every APG (apg: and apgs:) and every
+# class of the file, without those that set keep_on_delete: true.
 - name: "SA | {{ sa_policy_name }} (delete): entries"
   vars:
     sa_del_all: >-
       {{ (sa_del.sa_new_policy.apls | default([]))
          + ([sa_del.sa_new_policy.apg] if sa_del.sa_new_policy.apg is defined else [])
+         + (sa_del.sa_new_policy.apgs | default([]))
          + (sa_del.sa_new_policy.classes | default([])) }}
   ansible.builtin.set_fact:
     sa_del_policy: "{{ sa_del.sa_new_policy }}"

@@ -18,6 +18,9 @@
     sa_pol_update_only: >-
       {{ (sa_update_only | default(false) | bool) or (sa_pol.sa_update_only | default(false) | bool) }}
     sa_pol_classes: "{{ sa_pol.sa_new_policy.classes | default([]) }}"
+    sa_pol_apgs: >-
+      {{ ([sa_pol.sa_new_policy.apg] if sa_pol.sa_new_policy.apg is defined else [])
+         + (sa_pol.sa_new_policy.apgs | default([])) }}
     sa_pol_apls: "{{ sa_pol.sa_new_policy.apls | default([]) }}"
 
 - name: "SA | {{ sa_policy_name }}: test PDB only"
@@ -44,35 +47,47 @@
     label: "{{ item.name }}"
   when: not sa_pol_update_only | bool
 
-# apg: is optional: without it the APLs join no APG unless they list apgs:.
-# systems: may be empty (APG linked to no system, so not automated anywhere).
-- name: "SA | {{ sa_policy_name }}: check the APG"
+# APGs: apg: (the file's APG, default group of its APLs) and the apgs: list.
+# Both optional; without apg: every APL lists its own apgs:.  systems: may
+# be empty (APG linked to no system, so not automated anywhere).  An APG
+# cannot be put in another APG (SA: "Entry type APG requires a valid parent
+# type (SYS GRP)").  The automation manager names resources with at most 11
+# characters: an APG name longer than 11 needs an automation_name of up to
+# 11 (SA rejects a longer name as a supporting resource).
+- name: "SA | {{ sa_policy_name }}: check the APGs"
   ansible.builtin.assert:
     that:
-      - sa_pol_policy.apg.name is match('^[A-Z@#$][A-Z0-9@#$_]{0,19}$')
-      - sa_pol_policy.apg.type in ['SYSTEM', 'SYSPLEX']
-      - sa_pol_policy.apg.nature in ['BASIC', 'MOVE', 'SERVER']
-      - sa_pol_policy.apg.description | length <= 40
-      - sa_pol_policy.apg.systems | default([]) is sequence
-    fail_msg: "{{ sa_policy_name }}: APG {{ sa_pol_policy.apg.name | default('(missing)') }} has an invalid field."
+      - item.type in ['SYSTEM', 'SYSPLEX']
+      - item.nature in ['BASIC', 'MOVE', 'SERVER']
+      - item.description | length <= 40
+      - item.systems | default([]) is sequence
+      - item.apgs is not defined
+      - (item.automation_name | default(item.name)) | length <= 11
+    fail_msg: >-
+      {{ sa_policy_name }}: APG {{ item.name | default('(missing)') }} has an invalid field
+      (no apgs: on an APG; name, or automation_name, max 11 characters).
     quiet: true
-  when: not sa_pol_update_only | bool and sa_pol_policy.apg is defined
+  loop: "{{ sa_pol_apgs }}"
+  loop_control:
+    label: "{{ item.name | default('(missing)') }}"
+  when: not sa_pol_update_only | bool
 
 - name: "SA | {{ sa_policy_name }}: check the APG update fields"
-  vars:
-    sa_g: "{{ sa_pol_policy.apg }}"
   ansible.builtin.assert:
     that:
-      - sa_g.name is match('^[A-Z@#$][A-Z0-9@#$_]{0,19}$')
-      - sa_g.automation_name is not defined or sa_g.automation_name is match('^[A-Z@#$][A-Z0-9@#$_]{0,19}$')
-      - sa_g.behavior is not defined or sa_g.behavior in ['ACTIVE', 'PASSIVE']
-      - sa_g.automatically_link is not defined or sa_g.automatically_link is boolean or sa_g.automatically_link in ['YES', 'NO']
-      - sa_g.long_description | default([]) | length <= 5
-      - sa_g.relationships | default([]) | selectattr('type', 'undefined') | list | length == 0
-      - sa_g.relationships | default([]) | selectattr('resource', 'undefined') | list | length == 0
-    fail_msg: "{{ sa_policy_name }}: APG {{ sa_g.name | default('(missing)') }} has an invalid field."
+      - item.name is match('^[A-Z@#$][A-Z0-9@#$_]{0,19}$')
+      - item.automation_name is not defined or item.automation_name is match('^[A-Z@#$][A-Z0-9@#$_]{0,10}$')
+      - item.relationships | default([]) | map(attribute='resource', default='') | map('regex_replace', '/.*$', '') | map('length') | select('gt', 11) | list | length == 0
+      - item.behavior is not defined or item.behavior in ['ACTIVE', 'PASSIVE']
+      - item.automatically_link is not defined or item.automatically_link is boolean or item.automatically_link in ['YES', 'NO']
+      - item.long_description | default([]) | length <= 5
+      - item.relationships | default([]) | selectattr('type', 'undefined') | list | length == 0
+      - item.relationships | default([]) | selectattr('resource', 'undefined') | list | length == 0
+    fail_msg: "{{ sa_policy_name }}: APG {{ item.name | default('(missing)') }} has an invalid field."
     quiet: true
-  when: sa_pol_policy.apg is defined
+  loop: "{{ sa_pol_apgs }}"
+  loop_control:
+    label: "{{ item.name | default('(missing)') }}"
 
 - name: "SA | {{ sa_policy_name }}: check the APLs"
   ansible.builtin.assert:
@@ -82,7 +97,10 @@
       - item.job_type in ['MVS', 'NONMVS', 'TRANSIENT']
       - item.description | length <= 40
       - item.apgs | default([]) | reject('match', '^[A-Z@#$][A-Z0-9@#$_]{0,19}$') | list | length == 0
-    fail_msg: "{{ sa_policy_name }}: APL {{ item.name }} has an invalid field."
+      - item.apgs is defined or sa_pol_policy.apg is defined or sa_pol_apgs | length == 0
+    fail_msg: >-
+      {{ sa_policy_name }}: APL {{ item.name }} has an invalid field
+      {{- '' if (item.apgs is defined or sa_pol_policy.apg is defined or sa_pol_apgs | length == 0) else ' (the file has an apgs: list but no apg:, so the APL must list its apgs:)' }}.
     quiet: true
   loop: "{{ sa_pol_apls }}"
   loop_control:
@@ -117,7 +135,8 @@
     that:
       - sa_names | select('match', '^[A-Z@#$][A-Z0-9@#$_]{0,19}$') | list | length == sa_names | length
       - sa_names | unique | length == sa_names | length
-    fail_msg: "{{ sa_policy_name }}: invalid or duplicate APL / class entry names."
+      - sa_pol_apgs | map(attribute='name') | unique | length == sa_pol_apgs | length
+    fail_msg: "{{ sa_policy_name }}: invalid or duplicate APL / class / APG entry names."
     quiet: true
 
 # Values of the UPD sections of classes and APLs, in full adds and
@@ -139,6 +158,7 @@
       - item.skip_active_status is not defined or item.skip_active_status is boolean or item.skip_active_status in ['YES', 'NO']
       - item.relationships | default([]) | selectattr('type', 'undefined') | list | length == 0
       - item.relationships | default([]) | selectattr('resource', 'undefined') | list | length == 0
+      - item.relationships | default([]) | map(attribute='resource', default='') | map('regex_replace', '/.*$', '') | map('length') | select('gt', 11) | list | length == 0
       - item.startup | default([]) | map(attribute='phase') | reject('in', ['PRESTART', 'STARTUP', 'POSTSTART']) | list | length == 0
       - item.startup | default([]) | selectattr('commands', 'undefined') | list | length == 0
       - item.startup | default([]) | map(attribute='commands') | flatten | selectattr('command', 'undefined') | list | length == 0
@@ -186,8 +206,9 @@
       {%- set w_blk = L - 43 -%}
       {%- set p = sa_pol_policy -%}
       {%- set ncls = sa_pol_classes | length -%}
-      {%- for e in sa_pol_classes + ([p.apg] if p.apg is defined else []) + sa_pol_apls -%}
-      {%-   set w = ('class ' if loop.index0 < ncls else ('APG ' if (p.apg is defined and loop.index0 == ncls) else 'APL ')) ~ e.name ~ ' ' -%}
+      {%- set ngrp = sa_pol_apgs | length -%}
+      {%- for e in sa_pol_classes + sa_pol_apgs + sa_pol_apls -%}
+      {%-   set w = ('class ' if loop.index0 < ncls else ('APG ' if loop.index0 < ncls + ngrp else 'APL ')) ~ e.name ~ ' ' -%}
       {{-   chk(w ~ 'description', e.description, 40) -}}
       {%-   for line in e.long_description | default([]) -%}
       {{-     chk(w ~ 'long_description line ' ~ loop.index, line, 50) -}}
@@ -238,5 +259,5 @@
            template_vars={'sa_new_policy': sa_pol_policy, 'sa_update_only': sa_pol_update_only | bool}) | trim] }}
     sa_inglist_names: >-
       {{ sa_inglist_names
-         + ([sa_pol_policy.apg.name] if (sa_pol_policy.apg is defined and not sa_pol_update_only | bool) else [])
+         + ((sa_pol_apgs | map(attribute='name') | list) if not sa_pol_update_only | bool else [])
          + (sa_pol_apls | map(attribute='name') | list) }}

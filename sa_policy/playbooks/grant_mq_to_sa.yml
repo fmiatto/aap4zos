@@ -1,0 +1,211 @@
+---
+# =============================================================================
+# Playbook : grant_mq_to_sa.yml   (standalone)
+# Purpose  : Let SA z/OS issue the MQ and MVS commands of the MQ1 policy
+#            (vars/policies/mq1.yml), so INGREQ STOP/START of ZQSXMSTR,
+#            ZQSXCHIN and MQWEB works.
+#
+# Why: SA's stop commands were rejected by RACF:
+#     ICH408I USER(AUTOPROC) GROUP(STCGROUP) NAME(SYSTEM AUTOMATION)
+#       ZQSX.STOP.QMGR CL(MQCMDS)  FROM ZQSX.* (G)
+#       ACCESS INTENT(CONTROL)  ACCESS ALLOWED(NONE)
+#     ICH408I USER(AUTOPROC) GROUP(STCGROUP) NAME(SYSTEM AUTOMATION)
+#       MVS.STOP.STC.ZQSXCHIN.ZQSXCHIN CL(OPERCMDS)  FROM MVS.STOP.STC.ZQSX* (G)
+#       ACCESS INTENT(UPDATE)  ACCESS ALLOWED(NONE)
+#     IEE345I START AUTHORITY INVALID, FAILED BY SECURITY PRODUCT
+#     ICH408I USER(AUTOPROC) GROUP(STCGROUP) NAME(SYSTEM AUTOMATION)
+#       MVS.START.STC.ZQSXMSTR CL(OPERCMDS)  FROM MVS.START.STC.ZQSX* (G)
+#       ACCESS INTENT(UPDATE)  ACCESS ALLOWED(NONE)
+#
+# Who RACF sees: the SA autotasks have no RACF user IDs of their own, so
+#   commands from their consoles run under the user ID of the NetView/SA
+#   started task (D A,AUTOPROC -> USERID=AUTOPROC).  One grant to that user
+#   ID covers every SA autotask and console.
+#
+# What: the access every command of the MQ1 policy needs (mq_resources):
+#   MQCMDS   <ssid>.STOP.QMGR      CONTROL  +MQ1 STOP QMGR [MODE(FORCE)]
+#            <ssid>.START.CHINIT   CONTROL  +MQ1 START CHINIT
+#            <ssid>.STOP.CHINIT    CONTROL  +MQ1 STOP CHINIT
+#            (START QMGR is not checked in MQCMDS: the queue manager is not
+#            up yet.  MQ starts ZQSXMSTR with an MVS START under the console's
+#            user ID, so it needs MVS.START.STC.ZQSXMSTR below.)
+#   OPERCMDS MVS.START.STC.<j>      UPDATE  S <job>   (ZQSXMSTR from START QMGR,
+#                                                    ZQSXCHIN from START CHINIT,
+#                                                    MQWEB, C_APPL)
+#            MVS.STOP.STC.<j>.<j>   UPDATE  P <job>   (ZQSXMSTR, ZQSXCHIN, MQWEB)
+#            MVS.CANCEL.STC.<j>.<j> UPDATE  C <job>   (ZQSXMSTR, ZQSXCHIN, MQWEB)
+#   A START without JOBNAME= is checked as MVS.START.STC.<member> (no
+#   job name qualifier), as in the ICH408I above.
+#   No new profiles: the user ID is PERMITted to the profile that already
+#   protects each resource (the "FROM ... (G)" of ICH408I), with the highest
+#   access any of its resources needs; access the user ID already has at or
+#   above that level is left alone.  A resource no profile protects needs
+#   nothing (a new UACC(NONE) profile would lock everybody else out).
+#   Note that a generic profile such as ZQSX.* then also lets SA issue the
+#   other commands it protects.
+#   Then SETROPTS RACLIST/GENERIC REFRESH of each class; MQ checks MQCMDS
+#   through RACF on every command, so no MQ REFRESH SECURITY is needed.
+#
+# The Ansible user needs RACF SPECIAL (or ownership of the profiles).
+#
+# Run:
+#   ansible-playbook -i sa_policy/inventory/local/inventory.yml sa_policy/playbooks/grant_mq_to_sa.yml
+#   Other queue manager:  -e mq_ssid=ZQSY -e mq_mstr=ZQSYMSTR -e mq_chin=ZQSYCHIN ...
+# =============================================================================
+- name: SA | Grant MQ and MVS command authority to System Automation
+  hosts: zos_host
+  environment: "{{ environment_vars }}"
+  gather_facts: false
+
+  vars:
+    sa_proc: AUTOPROC                          # NetView/SA started task
+    mq_ssid: ZQSX                              # MQ subsystem (MQCMDS profile prefix)
+    mq_mstr: ZQSXMSTR                          # queue manager STC
+    mq_chin: ZQSXCHIN                          # channel initiator STC
+    mq_web: MQWEB                              # MQ web console STC (C_APPL)
+    # User IDs to grant to; empty = the user ID of the sa_proc started task
+    mq_grantees: []
+    # class, resource name, access needed
+    mq_resources:
+      - { class: MQCMDS, name: "{{ mq_ssid }}.STOP.QMGR", access: CONTROL }
+      - { class: MQCMDS, name: "{{ mq_ssid }}.START.CHINIT", access: CONTROL }
+      - { class: MQCMDS, name: "{{ mq_ssid }}.STOP.CHINIT", access: CONTROL }
+      - { class: OPERCMDS, name: "MVS.START.STC.{{ mq_mstr }}", access: UPDATE }
+      - { class: OPERCMDS, name: "MVS.STOP.STC.{{ mq_mstr }}.{{ mq_mstr }}", access: UPDATE }
+      - { class: OPERCMDS, name: "MVS.CANCEL.STC.{{ mq_mstr }}.{{ mq_mstr }}", access: UPDATE }
+      - { class: OPERCMDS, name: "MVS.START.STC.{{ mq_chin }}", access: UPDATE }
+      - { class: OPERCMDS, name: "MVS.STOP.STC.{{ mq_chin }}.{{ mq_chin }}", access: UPDATE }
+      - { class: OPERCMDS, name: "MVS.CANCEL.STC.{{ mq_chin }}.{{ mq_chin }}", access: UPDATE }
+      - { class: OPERCMDS, name: "MVS.START.STC.{{ mq_web }}", access: UPDATE }
+      - { class: OPERCMDS, name: "MVS.STOP.STC.{{ mq_web }}.{{ mq_web }}", access: UPDATE }
+      - { class: OPERCMDS, name: "MVS.CANCEL.STC.{{ mq_web }}.{{ mq_web }}", access: UPDATE }
+    mq_levels: [NONE, EXECUTE, READ, UPDATE, CONTROL, ALTER]
+    # One line per resource and user ID:
+    #   #@R <class> <resource> <user> <profile|-> <access of user|NONE|->
+    # RLIST ... GENERIC names the profile that protects the resource (same as
+    # ICH408I's FROM); RLIST <profile> AUTHUSER the user's access in it.
+    mq_lookup_script: |
+      look() {
+        prof=$(tsocmd "RLIST $1 $2 GENERIC" 2>/dev/null | awk 'p ~ /^-----/ {print $2; exit} {p=$0}')
+        if [ -z "$prof" ]; then echo "#@R $1 $2 $3 - -"; return; fi
+        acc=$(tsocmd "RLIST $1 $prof AUTHUSER" 2>/dev/null | awk -v u="$3" '$1==u {print $2; exit}')
+        echo "#@R $1 $2 $3 $prof ${acc:-NONE}"
+      }
+      {% for r in mq_resources %}
+      {% for u in sa_grantees %}
+      look {{ r.class }} {{ r.name }} {{ u }}
+      {% endfor %}
+      {% endfor %}
+
+  tasks:
+
+    # =========================================================================
+    # Who does SA run as?
+    # =========================================================================
+    - name: "SA | D A,{{ sa_proc }}"
+      ibm.ibm_zos_core.zos_operator:
+        cmd: "D A,{{ sa_proc }}"
+      register: sa_da
+
+    - name: "SA | User IDs to grant MQ command authority to"
+      ansible.builtin.set_fact:
+        sa_grantees: >-
+          {{ mq_grantees if mq_grantees | length > 0 else
+             (sa_da.stdout | regex_findall('USERID=([A-Z0-9@#$]+)') | unique) }}
+
+    - name: "SA | Stop if the SA user ID was not found"
+      ansible.builtin.assert:
+        that: sa_grantees | length > 0
+        fail_msg: "No USERID= in D A,{{ sa_proc }}: {{ sa_da.stdout_lines }}"
+        success_msg: "Granting MQ ({{ mq_ssid }}) command authority to {{ sa_grantees | join(', ') }}"
+
+    # =========================================================================
+    # Which profiles protect the resources, and what access the user has
+    # =========================================================================
+    - name: "SA | RACF profiles before"
+      ansible.builtin.shell: "{{ mq_lookup_script }}"
+      register: mq_before
+      changed_when: false
+
+    - name: "SA | Profiles and access before"
+      ansible.builtin.set_fact:
+        mq_found: >-
+          {{ mq_found | default([]) + [{
+               'class': f[1], 'resource': f[2], 'user': f[3], 'profile': f[4],
+               'key': f[1] ~ ' ' ~ f[4] ~ ' ' ~ f[3],
+               'have': mq_levels.index(f[5]) if f[5] in mq_levels else 0,
+               'want': mq_levels.index((mq_resources | selectattr('name', 'equalto', f[2]) | first).access)}] }}
+      vars:
+        f: "{{ item.split() }}"
+      loop: "{{ mq_before.stdout_lines | select('match', '^#@R ') | list }}"
+
+    - name: "SA | Before (class resource user profile access)"
+      ansible.builtin.debug:
+        msg: "{{ mq_before.stdout_lines | select('match', '^#@R ') | map('regex_replace', '^#@R ', '') | list }}"
+
+    # =========================================================================
+    # PERMIT, once per profile and user ID, at the highest access needed
+    # =========================================================================
+    - name: "SA | PERMIT"
+      ansible.builtin.shell: |
+        tsocmd "PERMIT {{ _rows[0].profile }} CLASS({{ _rows[0].class }}) ID({{ _rows[0].user }}) ACCESS({{ mq_levels[_want | int] }})" 2>&1
+      vars:
+        _rows: "{{ mq_found | selectattr('key', 'equalto', item) | list }}"
+        _want: "{{ _rows | map(attribute='want') | max }}"
+      loop: "{{ mq_found | rejectattr('profile', 'equalto', '-') | map(attribute='key') | unique | list }}"
+      loop_control:
+        label: "{{ item }} {{ mq_levels[_want | int] }}"
+      when: (_want | int) > (_rows[0].have | int)
+      register: mq_permit
+
+    - name: "SA | SETROPTS REFRESH"
+      ansible.builtin.shell: |
+        {% for c in mq_found | map(attribute='class') | unique %}
+        tsocmd "SETROPTS RACLIST({{ c }}) REFRESH" 2>&1
+        tsocmd "SETROPTS GENERIC({{ c }}) REFRESH" 2>&1
+        {% endfor %}
+      register: mq_refresh
+      when: mq_permit is changed
+
+    # =========================================================================
+    # Check
+    # =========================================================================
+    - name: "SA | RACF profiles after"
+      ansible.builtin.shell: "{{ mq_lookup_script }}"
+      register: mq_after
+      changed_when: false
+
+    - name: "SA | Result"
+      ansible.builtin.debug:
+        msg: >-
+          {{ (mq_permit.results | default([]) | selectattr('stdout', 'defined')
+              | map(attribute='stdout_lines') | flatten)
+             + (mq_refresh.stdout_lines | default([]))
+             + (mq_after.stdout_lines | select('match', '^#@R ') | map('regex_replace', '^#@R ', '') | list) }}
+
+    - name: "SA | Profiles and access after"
+      ansible.builtin.set_fact:
+        mq_checked: >-
+          {{ mq_checked | default([]) + [{
+               'resource': f[2], 'user': f[3], 'profile': f[4], 'access': f[5],
+               'ok': f[4] == '-' or (f[5] in mq_levels and mq_levels.index(f[5]) >=
+                     mq_levels.index((mq_resources | selectattr('name', 'equalto', f[2]) | first).access))}] }}
+      vars:
+        f: "{{ item.split() }}"
+      loop: "{{ mq_after.stdout_lines | select('match', '^#@R ') | list }}"
+
+    - name: "SA | The user ID must have the access"
+      vars:
+        _short: "{{ mq_checked | rejectattr('ok') | list }}"
+        _unprotected: "{{ mq_checked | selectattr('profile', 'equalto', '-') | map(attribute='resource') | unique | list }}"
+      ansible.builtin.assert:
+        that: _short | length == 0
+        fail_msg: >-
+          Access still too low: {{ _short }}.  See the PERMIT output in Result;
+          ICH06004I or "NOT AUTHORIZED" means the Ansible user lacks RACF SPECIAL
+          or ownership of the profile.
+        success_msg: >-
+          {{ sa_grantees | join(', ') }} can issue the MQ1 commands.
+          {{ ('Not protected by any profile (nothing needed): ' ~ (_unprotected | join(', ')) ~ '.')
+             if _unprotected | length > 0 else '' }}
+          Test: INGREQ {{ mq_mstr }}/APL/LTE1 REQ=STOP, then REQ=START.

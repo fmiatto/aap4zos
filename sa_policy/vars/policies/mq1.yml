@@ -2,16 +2,16 @@
 # =============================================================================
 # File    : vars/policies/mq1.yml   (sa_policies name: mq1)
 # Purpose : IBM MQ queue manager MQ1 on LTE1: the queue manager (ZQSXMSTR),
-#           its channel initiator (ZQSXCHIN) and the MQ web console (MQWEB)
+#           its channel initiator (ZQSXCHIN) and the MQ web console (MQWEBS)
 #           as one APG.
 #
 #   ZQSXMSTR, ZQSXCHIN -> no class: their start and stop commands and the
 #                         "is available" messages (AT status UP) are set here.
-#   MQWEB              -> no category, class C_APPL (generic STC).
+#   MQWEBS              -> no category, class C_APPL (generic STC).
 #
-# Start order: the APG waits for TCPIP; CHIN and MQWEB wait for ZQSXMSTR.
-# The CHIN commands use &SUBPCMDPFX, the command prefix of its parent
-# ZQSXMSTR (+MQ1).
+# Start order: the APG waits for TCPIP; CHIN and MQWEBS wait for ZQSXMSTR.
+# ZQSXCHIN has the same command prefix as ZQSXMSTR (ZQSX), so both use
+# &SUBSCMDPFX (each entry's own prefix).
 # =============================================================================
 # Full add: NEW sections create the entries, then the UPD sections.
 # true = UPD sections only, for entries that already exist
@@ -41,7 +41,7 @@ sa_new_policy:
       category: MQ
       subcategory: MSTR
       description: IBM MQ queue manager MQ1
-      command_prefix: "+MQ1"
+      command_prefix: "ZQSX"
       # Commands and message texts: max 212 characters, replies 61.
       startup:
         - phase: STARTUP              # PRESTART | STARTUP | POSTSTART
@@ -76,6 +76,7 @@ sa_new_policy:
       category: MQ
       subcategory: CHIN
       description: IBM MQ channel initiator MQ1
+      command_prefix: "ZQSX"          # same as the queue manager
       # Plain HASPARENT: SA starts and stops CHIN itself with the commands
       # below, once ZQSXMSTR is up.  (StartsMeAndStopsMe would mean the queue
       # manager starts CHIN; that needs external_startup and
@@ -88,18 +89,18 @@ sa_new_policy:
         - phase: STARTUP
           mixed_case: "NO"
           commands:
-            - { command: "MVS &SUBPCMDPFX START CHINIT" }
+            - { command: "MVS &SUBSCMDPFX START CHINIT" }
       shutdown:
         - phase: NORM
           mixed_case: "NO"
           passes:
-            - { pass: 1, command: "MVS &SUBPCMDPFX STOP CHINIT" }
+            - { pass: 1, command: "MVS &SUBSCMDPFX STOP CHINIT" }
             - { pass: 3, command: "MVS P &SUBSJOB" }
             - { pass: 4, command: "MVS C &SUBSJOB" }
         - phase: IMMED
           mixed_case: "NO"
           passes:
-            - { pass: 1, command: "MVS &SUBPCMDPFX STOP CHINIT" }
+            - { pass: 1, command: "MVS &SUBSCMDPFX STOP CHINIT" }
             - { pass: 2, command: "MVS C &SUBSJOB" }
         - phase: FORCE
           mixed_case: "NO"
@@ -111,9 +112,9 @@ sa_new_policy:
           at: { status: UP }
 
     # No category: a generic STC through C_APPL.
-    - name: MQWEB
-      subsystem: MQWEB
-      job_name: MQWEB
+    - name: MQWEBS
+      subsystem: MQWEBS
+      job_name: MQWEBS
       job_type: MVS
       link_to_class: C_APPL
       description: IBM MQ web console
@@ -140,7 +141,7 @@ sa_new_policy:
   update_sections:
     apg: true                         # MQ1_MQ long description, HASPARENT TCPIP
     description: true                 # long descriptions
-    application_info: true            # ZQSXMSTR: command prefix +MQ1
+    application_info: true            # ZQSXMSTR, ZQSXCHIN: command prefix ZQSX
     relationships: true
     messages: true                    # CSQY022I / CSQX022I -> UP
     startup: true                     # no class: start commands here

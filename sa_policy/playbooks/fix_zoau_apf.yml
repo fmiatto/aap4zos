@@ -16,7 +16,10 @@
 #      +a needs it, also as UID 0: rsn=0924041A without it), and READ on
 #      BPX.SUPERUSER so the user can su to UID 0 (rsn=EF076043 without it).
 #   2. As UID 0 (su): extattr +a on every *helper in ZOAU's bin, plus opercmd
-#      and mvscmdauth.
+#      and mvscmdauth.  When ZOAU's file system is mounted read-only
+#      (errno=8D EROFS without it), it is remounted read/write with chmount -w
+#      for the change and back to read-only with chmount -r afterwards, also
+#      when extattr fails.  zoau_remount=false turns this off.
 #   3. ls -E shows the result: the first attribute column must be "a".
 #
 # Uses only ansible.builtin.raw (z/OS UNIX shell over SSH, tsocmd for RACF):
@@ -33,6 +36,8 @@
   vars:
     zoau_bin: "{{ ZOAU }}/bin"                 # ZOAU from the inventory
     apf_user: "{{ ansible_user | upper }}"
+    # Remount a read-only ZOAU file system read/write for step 2.
+    zoau_remount: true
     # One SSH session per task: the RACF changes of step 1 apply to new
     # sessions only, not to a shared (ControlMaster) connection.
     ansible_ssh_args: "-o ControlMaster=no -o ControlPath=none"
@@ -73,19 +78,60 @@
     # =========================================================================
     # 2. extattr +a as UID 0 (new SSH session, so the new RACF access applies)
     # =========================================================================
-    - name: "ZOAU | extattr +a as UID 0"
+    # df -v line 2: <mount point> (<file system>) ...; line 3: ZFS, Read Only
+    # or ZFS, Read/Write, ...
+    - name: "ZOAU | Mount of {{ zoau_bin }}"
       ansible.builtin.raw: |
-        cd {{ zoau_bin }} || exit 8
-        # One line: su runs each input line as a separate command.
-        files="opercmd mvscmdauth $(ls | grep 'helper$' | tr '\n' ' ')"
-        echo "id: $(echo id | su 2>&1)"
-        echo "files: $files"
-        echo "cd {{ zoau_bin }} && extattr +a $files" | su 2>&1
-      register: zoau_extattr
+        df -v {{ zoau_bin }}
+      register: zoau_df
+      changed_when: false
 
-    - name: "ZOAU | extattr result"
+    - name: "ZOAU | Mount point and mode"
+      ansible.builtin.set_fact:
+        zoau_mount_point: "{{ (zoau_df.stdout_lines | select('match', '^/') | first).split()[0] }}"
+        zoau_read_only: "{{ zoau_df.stdout is search('Read Only') }}"
+
+    - name: "ZOAU | Read-only file system"
       ansible.builtin.debug:
-        msg: "{{ zoau_extattr.stdout_lines }}"
+        msg: >-
+          {{ zoau_bin }} is on {{ zoau_mount_point }}, mounted read-only:
+          {{ 'remounting it read/write for extattr' if zoau_remount
+             else 'zoau_remount=false, extattr will fail with errno=8D' }}.
+      when: zoau_read_only | bool
+
+    - name: "ZOAU | extattr on the ZOAU file system"
+      block:
+        - name: "ZOAU | Remount {{ zoau_mount_point }} read/write"
+          ansible.builtin.raw: |
+            echo "/usr/sbin/chmount -w {{ zoau_mount_point }}" | su 2>&1
+            df -v {{ zoau_bin }}
+          register: zoau_remount_rw
+          failed_when: zoau_remount_rw.stdout is not search('Read/Write')
+          when: zoau_read_only | bool and zoau_remount | bool
+
+        - name: "ZOAU | extattr +a as UID 0"
+          ansible.builtin.raw: |
+            cd {{ zoau_bin }} || exit 8
+            # One line: su runs each input line as a separate command.
+            files="opercmd mvscmdauth $(ls | grep 'helper$' | tr '\n' ' ')"
+            echo "id: $(echo id | su 2>&1)"
+            echo "files: $files"
+            echo "cd {{ zoau_bin }} && extattr +a $files" | su 2>&1
+          register: zoau_extattr
+
+        - name: "ZOAU | extattr result"
+          ansible.builtin.debug:
+            msg: "{{ zoau_extattr.stdout_lines }}"
+
+      always:
+        # Only when this play remounted it: restore the original mode.
+        - name: "ZOAU | Remount {{ zoau_mount_point }} read-only again"
+          ansible.builtin.raw: |
+            echo "/usr/sbin/chmount -r {{ zoau_mount_point }}" | su 2>&1
+            df -v {{ zoau_bin }}
+          register: zoau_remount_ro
+          failed_when: zoau_remount_ro.stdout is not search('Read Only')
+          when: zoau_remount_rw is changed
 
     # =========================================================================
     # 3. Check
@@ -107,5 +153,6 @@
         fail_msg: >-
           Still not APF-authorized: {{ _missing }}. extattr result:
           {{ zoau_extattr.stdout_lines }}.  rsn=0924041A: no READ on
-          BPX.FILEATTR.APF; rsn=EF076043 or su refused: not UID 0 (BPX.SUPERUSER).
+          BPX.FILEATTR.APF; rsn=EF076043 or su refused: not UID 0 (BPX.SUPERUSER);
+          errno=8D: {{ zoau_mount_point }} is mounted read-only (zoau_remount).
         success_msg: "{{ zoau_after.stdout_lines | length }} files APF-authorized in {{ zoau_bin }}."

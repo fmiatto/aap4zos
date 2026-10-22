@@ -1,8 +1,9 @@
 ---
 # =============================================================================
 # File    : vars/policies/ims15.yml   (sa_policies name: ims15)
-# Purpose : IMS subsystem IMS15 (DB/DC with CSL): the IMS classes, one APG
-#           and its APLs.  Not in sa_policies: IMS is not installed on LTE1.
+# Purpose : IMS subsystem IMS15 (DB/DC with CSL): the IMS classes, four
+#           APGs and the APLs, in the layout of IBM's IMS best-practice
+#           policy.  Not in sa_policies: IMS is not installed on LTE1.
 #           Add it with -e sa_policies=ims15 on a system that runs the IMS15
 #           address spaces (job names = APL names), or try it on a test PDB:
 #
@@ -26,11 +27,13 @@
 #   classes too; when another IMS uses them, mark them keep_on_delete: true
 #   first (SA unlinks the APLs of a deleted class without a warning).
 #
-# Start order (HASPARENT):
-#   BASE_SYS -> IMS15RL1 (IRLM), IMS15SCI
-#   IMS15SCI -> IMS15OM1, IMS15RS1 -> IMS15RM1
-#   IMS15RL1, SCI, OM1, RM1 -> IMS15CTL -> DL1, RC1 (StartsMeAndStopsMe),
-#                                          F11, M11, M12 (/STA REGION), HWS
+# Start order (HASPARENT between the groups; operate IMS15 on the groups):
+#   BASE_SYS -> IMS15_SUPP  (IMS15RL1, IMS15RS1, IMS15HWS)
+#            -> IMS15_CSL   (IMS15SCI -> IMS15OM1, IMS15RM1)
+#            -> IMS15_CTRL  (IMS15CTL -> IMS15DL1, IMS15RC1:
+#                            StartsMeAndStopsMe)
+#            -> IMS15_APPLS (IMS15F11, IMS15M11, IMS15M12: /STA REGION by
+#                            IMS15CTL)
 #   The dependent regions' parent has sequence 1: SA takes &SUBP... (the
 #   parent's subsystem ID and command prefix) from it.
 # =============================================================================
@@ -485,36 +488,115 @@ sa_new_policy:
             - { pass: 1, command: "MVS F &SUBSJOB,DUMP" }
             - { pass: 2, command: "MVS C &SUBSJOB" }
 
-  apg:
-    name: IMS15
-    type: SYSTEM
-    nature: BASIC
-    description: IMS subsystem IMS15
-    long_description:
-      - All IMS15 address spaces
-    systems:
-      - LTE1
+  # ---------------------------------------------------------------------------
+  # APGs, as in IBM's IMS best-practice policy (SINGPDB(AOFJPDB7)): one group
+  # per function and the dependencies between the groups; operate IMS on the
+  # group level.  Group names max 11 characters (automation manager names).
+  #   IMS15_SUPP    IRLM, Repository Server, IMS Connect   <- BASE_SYS
+  #   IMS15_CSL     SCI, OM, RM                            <- IMS15_SUPP
+  #   IMS15_CTRL    control region, DLISAS, DBRC           <- IMS15_CSL
+  #   IMS15_APPLS   dependent regions                      <- IMS15_CTRL
+  # Start all of IMS15: start IMS15_APPLS (SA starts its supporting groups
+  # first).  Stop all of IMS15: stop IMS15_SUPP (SA stops the groups that
+  # depend on it first).
+  # ---------------------------------------------------------------------------
+  apgs:
+    - name: IMS15_SUPP
+      type: SYSTEM
+      nature: BASIC
+      description: IMS15 IRLM, Repository, IMS Connect
+      long_description:
+        - Started first, on the base system
+      systems: [LTE1]
+      relationships:
+        - { type: HASPARENT, resource: BASE_SYS/APG/= }
+
+    - name: IMS15_CSL
+      type: SYSTEM
+      nature: BASIC
+      description: IMS15 CSL (SCI, OM, RM)
+      long_description:
+        - Started when IMS15_SUPP is available
+      systems: [LTE1]
+      relationships:
+        - { type: HASPARENT, resource: IMS15_SUPP/APG/= }
+
+    - name: IMS15_CTRL
+      type: SYSTEM
+      nature: BASIC
+      description: IMS15 control region, DLISAS, DBRC
+      long_description:
+        - Started when IMS15_CSL is available
+      systems: [LTE1]
+      relationships:
+        - { type: HASPARENT, resource: IMS15_CSL/APG/= }
+
+    - name: IMS15_APPLS
+      type: SYSTEM
+      nature: BASIC
+      description: IMS15 dependent regions (FP, MPP, BMP)
+      long_description:
+        - Started by IMS15CTL (/STA REGION)
+      systems: [LTE1]
+      relationships:
+        - { type: HASPARENT, resource: IMS15_CTRL/APG/= }
 
   apls:
 
-    # IRLM and CSL: started first, on the base system.
+    # IMS15_SUPP: no IMS parent; the group waits for BASE_SYS.
     - name: IMS15RL1
       subsystem: IMS15RL1
       job_name: IMS15RL1
       job_type: MVS
       link_to_class: C_IMS_GENERIC
       description: IMS15 Resource Lock Manager (IRLM)
-      relationships:
-        - { type: HASPARENT, resource: BASE_SYS/APG/= }
+      apgs: [IMS15_SUPP]
 
+    - name: IMS15RS1
+      subsystem: IMS15RS1
+      job_name: IMS15RS1
+      job_type: MVS
+      link_to_class: C_IMS_GENERIC
+      description: IMS15 Repository Server (RS)
+      apgs: [IMS15_SUPP]
+      messages:
+        - id: FRP2001I
+          description: Subordinate Repository Server is UP
+          at: { status: UP }
+        - id: FRP2025I
+          description: Master Repository Server is UP
+          at: { status: UP }
+
+    # IMS Connect connects to IMS15 when the control region comes up, so it
+    # does not wait for it.
+    - name: IMS15HWS
+      subsystem: IMS15HWS
+      job_name: IMS15HWS
+      job_type: MVS
+      link_to_class: C_IMS_GENERIC
+      description: IMS15 IMS Connect
+      apgs: [IMS15_SUPP]
+      messages:
+        - id: HWSC0000I
+          description: IMS Connect is ready
+          at: { status: UP }
+        - id: HWSC0010I
+          description: IMS Connect port is listening
+          at: { status: UP }
+        - id: WTORS
+          description: Specifications for WTORS
+          code:
+            - { code1: HWSC0000I, code2: "*", value: NORMAL PRI }
+            - { code1: "*", code2: "*", value: IMPORTANT SEC }
+
+    # IMS15_CSL: SCI first, then OM and RM (they register with SCI).
     - name: IMS15SCI
       subsystem: IMS15SCI
       job_name: IMS15SCI
       job_type: MVS
       link_to_class: C_IMS_GENERIC
       description: IMS15 Structured Call Interface (SCI)
-      relationships:
-        - { type: HASPARENT, resource: BASE_SYS/APG/= }
+      apgs: [IMS15_CSL]
       shutdown:
         - phase: NORM
           passes:
@@ -528,24 +610,9 @@ sa_new_policy:
       job_type: MVS
       link_to_class: C_IMS_GENERIC
       description: IMS15 Operations Manager (OM)
+      apgs: [IMS15_CSL]
       relationships:
         - { type: HASPARENT, resource: IMS15SCI/APL/= }
-
-    - name: IMS15RS1
-      subsystem: IMS15RS1
-      job_name: IMS15RS1
-      job_type: MVS
-      link_to_class: C_IMS_GENERIC
-      description: IMS15 Repository Server (RS)
-      relationships:
-        - { type: HASPARENT, resource: IMS15SCI/APL/= }
-      messages:
-        - id: FRP2001I
-          description: Subordinate Repository Server is UP
-          at: { status: UP }
-        - id: FRP2025I
-          description: Master Repository Server is UP
-          at: { status: UP }
 
     - name: IMS15RM1
       subsystem: IMS15RM1
@@ -553,11 +620,13 @@ sa_new_policy:
       job_type: MVS
       link_to_class: C_IMS_GENERIC
       description: IMS15 Resource Manager (RM)
+      apgs: [IMS15_CSL]
       relationships:
         - { type: HASPARENT, resource: IMS15SCI/APL/= }
-        - { type: HASPARENT, resource: IMS15RS1/APL/= }
 
-    # Control region.
+    # IMS15_CTRL: the control region (its group waits for IMS15_CSL, which
+    # waits for IMS15_SUPP with the IRLM); DLISAS and DBRC are started and
+    # stopped by it (class C_IMS15_SUBORDINATES).
     - name: IMS15CTL
       subsystem: IMS15CTL
       job_name: IMS15CTL
@@ -566,18 +635,13 @@ sa_new_policy:
       subcategory: CTL
       link_to_class: C_IMS_DBDC
       description: IMS15 Control Region
-      relationships:
-        - { type: HASPARENT, resource: IMS15RL1/APL/= }
-        - { type: HASPARENT, resource: IMS15SCI/APL/= }
-        - { type: HASPARENT, resource: IMS15OM1/APL/= }
-        - { type: HASPARENT, resource: IMS15RM1/APL/= }
+      apgs: [IMS15_CTRL]
       messages:
         - id: UP_IMS15RL1
           description: Reconnect if IRLM is recycled
           cmd:
             - { command: "MVS F &SUBSJOB,RECONNECT" }
 
-    # Subordinate regions: started and stopped by IMS15CTL.
     - name: IMS15DL1
       subsystem: IMS15DL1
       job_name: IMS15DL1
@@ -586,6 +650,7 @@ sa_new_policy:
       subcategory: DLS
       link_to_class: C_IMS15_SUBORDINATES
       description: IMS15 DL/I Secondary Address Space
+      apgs: [IMS15_CTRL]
 
     - name: IMS15RC1
       subsystem: IMS15RC1
@@ -595,8 +660,10 @@ sa_new_policy:
       subcategory: DBRC
       link_to_class: C_IMS15_SUBORDINATES
       description: IMS15 Database Recovery Control (DBRC)
+      apgs: [IMS15_CTRL]
 
-    # Dependent regions: started by IMS15CTL (/STA REGION).
+    # IMS15_APPLS: started by IMS15CTL (/STA REGION); their classes make
+    # IMS15CTL the parent (sequence 1).
     - name: IMS15F11
       subsystem: IMS15F11
       job_name: IMS15F11
@@ -605,6 +672,7 @@ sa_new_policy:
       subcategory: FP
       link_to_class: C_IMS15_TP_APPLS
       description: IMS15 Fast Path Dependent Region
+      apgs: [IMS15_APPLS]
 
     - name: IMS15M12
       subsystem: IMS15M12
@@ -614,6 +682,7 @@ sa_new_policy:
       subcategory: TP
       link_to_class: C_IMS15_TP_APPLS
       description: IMS15 Message Processing Region
+      apgs: [IMS15_APPLS]
 
     - name: IMS15M11
       subsystem: IMS15M11
@@ -623,28 +692,7 @@ sa_new_policy:
       subcategory: BMP
       link_to_class: C_IMS15_BMP_APPLS
       description: IMS15 Batch Message Processing Region
-
-    # IMS Connect.
-    - name: IMS15HWS
-      subsystem: IMS15HWS
-      job_name: IMS15HWS
-      job_type: MVS
-      link_to_class: C_IMS_GENERIC
-      description: IMS15 IMS Connect
-      relationships:
-        - { type: HASPARENT, resource: IMS15CTL/APL/= }
-      messages:
-        - id: HWSC0000I
-          description: IMS Connect is ready
-          at: { status: UP }
-        - id: HWSC0010I
-          description: IMS Connect port is listening
-          at: { status: UP }
-        - id: WTORS
-          description: Specifications for WTORS
-          code:
-            - { code1: HWSC0000I, code2: "*", value: NORMAL PRI }
-            - { code1: "*", code2: "*", value: IMPORTANT SEC }
+      apgs: [IMS15_APPLS]
 
   # ---------------------------------------------------------------------------
   # update_sections - the UPD parts this file writes (left out = off).  A part
@@ -664,7 +712,7 @@ sa_new_policy:
   #   db2_control       DB2 subsystem ID and active log, APLs only (policy)
   # ---------------------------------------------------------------------------
   update_sections:
-    apg: true                         # IMS15 long description
+    apg: true                         # APG long descriptions, relationships
     description: true
     application_info: true            # external startup/shutdown of classes
     relationships: true
