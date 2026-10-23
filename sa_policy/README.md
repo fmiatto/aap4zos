@@ -72,6 +72,7 @@ Variables given only with `-e`:
 | [rmf.yml](vars/policies/rmf.yml) | Update-only: Restart after IPL `START` on the existing APL `RMF` |
 | [mq1.yml](vars/policies/mq1.yml) | APG `MQ1_MQ`: IBM MQ queue manager, channel initiator and web console, with their own start and stop commands and messages |
 | [ims15.yml](vars/policies/ims15.yml) | The IMS classes and IMS DB/DC `IMS15` in the layout of IBM's IMS best-practice policy, as a chain of four APGs: `IMS15_SUPP` (IRLM, Repository Server, IMS Connect) → `IMS15_CSL` (SCI, OM, RM) → `IMS15_CTRL` (control region, DLISAS, DBRC) → `IMS15_APPLS` (dependent regions). Not in `sa_policies` (IMS is not installed on LTE1) |
+| [zcdp.yml](vars/policies/zcdp.yml) | APG `ZCDP`: IBM Z Common Data Provider: Data Streamer `HBODSPRO`, then System Data Engine `HBOSMF` and Log Forwarder `HBOPROC`, on class `C_APPL`, restarted after IPL |
 | [example-add.yml](vars/policies/example-add.yml) | Test PDB only: every field the playbook can write (two classes, two APGs, two APLs), to add and to update |
 | [example-delete.yml](vars/policies/example-delete.yml) | Test PDB only: the minimal file to delete classes, an APG and APLs (the `example-add` entries) |
 

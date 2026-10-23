@@ -1,0 +1,118 @@
+---
+# =============================================================================
+# File    : vars/policies/zcdp.yml   (sa_policies name: zcdp)
+# Purpose : IBM Z Common Data Provider (CDP) on LTE1: one APG and its three
+#           started tasks, with the standard start and stop of class C_APPL
+#           (S jobname; P jobname, then C jobname).
+#
+#   HBODSPRO -> Data Streamer (BPXBATSL, /var/zcdp/ds): receives the data of
+#               the gatherers and sends it to the subscribers.  UP when it
+#               issues HBO6001I ("The Data Streamer started successfully").
+#   HBOSMF   -> System Data Engine (PGM=HBOPDE): collects SMF from log
+#               stream IFASMF.CDP and sends it to the Data Streamer
+#               (PORT 5140).  UP when it issues HBO0300I ("System Data
+#               Engine Collect started").
+#   HBOPROC  -> Log Forwarder (BPXBATSL, /var/zcdp/lf): sends log data to
+#               the Data Streamer.  UP when it issues HBOA002I ("The z/OS
+#               Log Forwarder initialization is complete").
+#   Procs in SYS1.USER.PROCLIB.
+#
+# Start order: the group waits for BASE_SYS; the Data Streamer starts before
+# the gatherers (HASPARENT HBODSPRO), which stop before it.
+# Restart after IPL START: SA starts them after every IPL even when they
+# were stopped outside SA (C_APPL alone gives MAYBE).
+# =============================================================================
+# Full add: NEW sections create the entries, then the UPD sections.
+# true = UPD sections only, for entries that already exist
+# (-e sa_update_only=true does that for every file of a run).
+sa_update_only: false
+
+sa_new_policy:
+
+  apg:
+    name: ZCDP                        # max 11 characters
+    type: SYSTEM
+    nature: BASIC
+    description: IBM Z Common Data Provider
+    long_description:
+      - Data Streamer, System Data Engine, Log Forwarder
+    systems:
+      - LTE1
+    relationships:
+      - { type: HASPARENT, resource: BASE_SYS/APG/= }
+
+  apls:
+    - name: HBODSPRO
+      subsystem: HBODSPRO
+      job_name: HBODSPRO
+      job_type: MVS
+      link_to_class: C_APPL
+      description: CDP Data Streamer
+      long_description:
+        - Receives gatherer data, sends it to subscribers
+      restart_after_ipl: START
+      # UP message: without it SA sees the address space active but never UP
+      # (status STARTED2 after the start timeout).
+      messages:
+        - id: HBO6001I
+          description: Data Streamer started successfully
+          at: { status: UP }
+
+    - name: HBOSMF
+      subsystem: HBOSMF
+      job_name: HBOSMF
+      job_type: MVS
+      link_to_class: C_APPL
+      description: CDP System Data Engine (SMF)
+      long_description:
+        - SMF from log stream IFASMF.CDP to Data Streamer
+      restart_after_ipl: START
+      messages:
+        - id: HBO0300I
+          description: System Data Engine Collect started
+          at: { status: UP }
+      relationships:
+        - { type: HASPARENT, resource: HBODSPRO/APL/= }
+
+    - name: HBOPROC
+      subsystem: HBOPROC
+      job_name: HBOPROC
+      job_type: MVS
+      link_to_class: C_APPL
+      description: CDP Log Forwarder
+      long_description:
+        - Log data to the Data Streamer
+      restart_after_ipl: START
+      messages:
+        - id: HBOA002I
+          description: Log Forwarder initialization complete
+          at: { status: UP }
+      relationships:
+        - { type: HASPARENT, resource: HBODSPRO/APL/= }
+
+  # ---------------------------------------------------------------------------
+  # update_sections - the UPD parts this file writes (left out = off).  A part
+  # is written only for entries that have data for it (fields: README).
+  #   apg               APG long_description, automation_name, behavior,
+  #                     automatically_link (field), relationships (policy)
+  #   description       long_description; in update-only files also
+  #                     description (field)
+  #   application_info  command_prefix, restart_after_ipl, external_startup,
+  #                     external_shutdown, skip_active_status (field)
+  #   relationships     replaces all relationships of the entry (policy)
+  #   messages          replaces all messages of the entry (block)
+  #   startup           replaces all start commands (block)
+  #   shutdown          replaces all stop commands (block)
+  #   thresholds        the entry's error thresholds (field)
+  #   minor_resources   replaces all minor resources (block)
+  #   db2_control       DB2 subsystem ID and active log, APLs only (policy)
+  # ---------------------------------------------------------------------------
+  update_sections:
+    apg: true                         # ZCDP long description, HASPARENT BASE_SYS
+    description: true                 # long descriptions
+    application_info: true            # Restart after IPL: START
+    relationships: true               # gatherers -> HBODSPRO
+    messages: true                    # UP messages: HBO6001I, HBO0300I, HBOA002I
+    startup: false                    # C_APPL: S jobname
+    shutdown: false                   # C_APPL: P jobname, C jobname
+    db2_control: false

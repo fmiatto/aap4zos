@@ -18,7 +18,7 @@
 # -e sa_policies_delete=ims15; -e sa_policies= gives an empty list.
 # ---------------------------------------------------------------------------
 sa_policies:
-   - ims15
+   - zcdp
 
 sa_policies_delete: []
 
